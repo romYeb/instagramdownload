@@ -1,7 +1,7 @@
 "use client";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Grid3X3, List, Filter } from "lucide-react";
+import { Grid3X3, List, Filter, ChevronDown, Loader2 } from "lucide-react";
 import type { InstagramMedia, FilterType } from "@/types/instagram";
 import type { DownloadItem } from "@/types/instagram";
 import { MediaCard } from "./MediaCard";
@@ -16,6 +16,12 @@ interface MediaGridProps {
   onDownload: (media: InstagramMedia) => void;
   onSelectAll: () => void;
   onClearSelected: () => void;
+  // pagination
+  hasMore: boolean;
+  isLoadingMore: boolean;
+  loadedCount: number;
+  totalCount: number;
+  onLoadMore: () => void;
 }
 
 const FILTER_LABELS: Record<FilterType, string> = {
@@ -34,9 +40,15 @@ export function MediaGrid({
   onDownload,
   onSelectAll,
   onClearSelected,
+  hasMore,
+  isLoadingMore,
+  loadedCount,
+  totalCount,
+  onLoadMore,
 }: MediaGridProps) {
   const [filter, setFilter] = useState<FilterType>("all");
   const [cols, setCols] = useState<3 | 4>(3);
+  const sentinelRef = useRef<HTMLDivElement>(null);
 
   const filtered = useMemo(() => {
     if (filter === "all") return media;
@@ -45,15 +57,29 @@ export function MediaGrid({
 
   const counts = useMemo(() => {
     const acc: Record<string, number> = { all: media.length };
-    for (const m of media) {
-      acc[m.type] = (acc[m.type] ?? 0) + 1;
-    }
+    for (const m of media) acc[m.type] = (acc[m.type] ?? 0) + 1;
     return acc;
   }, [media]);
 
-  const findDownload = (mediaId: string) => {
-    return Array.from(downloads.values()).find((item) => item.mediaId === mediaId);
-  };
+  const findDownload = (mediaId: string) =>
+    Array.from(downloads.values()).find((item) => item.mediaId === mediaId);
+
+  // Auto-load on scroll
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || !hasMore) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && !isLoadingMore) onLoadMore();
+      },
+      { rootMargin: "300px" }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasMore, isLoadingMore, onLoadMore]);
+
+  const pct = totalCount > 0 ? Math.round((loadedCount / totalCount) * 100) : 100;
 
   return (
     <motion.section
@@ -62,6 +88,29 @@ export function MediaGrid({
       transition={{ duration: 0.4 }}
       className="mx-auto max-w-6xl px-4"
     >
+      {/* Progress bar + count */}
+      {totalCount > 0 && (
+        <div className="mb-5 rounded-xl border border-border bg-surface p-4">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium text-text-primary">
+              {loadedCount.toLocaleString("fr-FR")} médias chargés
+              {totalCount > loadedCount && (
+                <span className="text-text-muted"> / {totalCount.toLocaleString("fr-FR")} total</span>
+              )}
+            </span>
+            <span className="text-xs text-text-secondary font-mono">{pct}%</span>
+          </div>
+          <div className="h-1.5 rounded-full bg-surface-3 overflow-hidden">
+            <motion.div
+              className="h-full rounded-full bg-gradient-purple-blue"
+              initial={{ width: 0 }}
+              animate={{ width: `${pct}%` }}
+              transition={{ duration: 0.5 }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Toolbar */}
       <div className="mb-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         {/* Filters */}
@@ -154,6 +203,45 @@ export function MediaGrid({
           </AnimatePresence>
         </div>
       )}
+
+      {/* Load More zone */}
+      <div ref={sentinelRef} className="mt-10 flex flex-col items-center gap-4">
+        {isLoadingMore && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="flex flex-col items-center gap-3"
+          >
+            <Loader2 className="h-6 w-6 animate-spin text-primary" />
+            <p className="text-sm text-text-secondary">
+              Chargement de la page suivante...
+            </p>
+          </motion.div>
+        )}
+
+        {hasMore && !isLoadingMore && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center gap-2">
+            <Button
+              variant="outline"
+              size="md"
+              onClick={onLoadMore}
+              className="gap-2 min-w-[200px]"
+            >
+              <ChevronDown className="h-4 w-4" />
+              Charger plus de médias
+            </Button>
+            <p className="text-xs text-text-muted">
+              {loadedCount} / {totalCount} — {totalCount - loadedCount} restants
+            </p>
+          </motion.div>
+        )}
+
+        {!hasMore && loadedCount > 0 && (
+          <p className="text-xs text-text-muted py-4">
+            ✓ Tous les {loadedCount} médias publics ont été chargés.
+          </p>
+        )}
+      </div>
     </motion.section>
   );
 }

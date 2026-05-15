@@ -20,7 +20,7 @@ const LOADING_STEPS = [
 ];
 
 export default function Home() {
-  const { state, analyze, reset } = useInstagram();
+  const { state, analyze, loadMore, reset } = useInstagram();
 
   const username =
     state.status === "success" || state.status === "loading"
@@ -39,33 +39,33 @@ export default function Home() {
     cancelZip,
   } = useDownload(username);
 
-  // Save history on success
+  // Save to history when profile loads (only once, on first media load)
   useEffect(() => {
-    if (state.status === "success") {
-      const { profile } = state;
+    if (state.status === "success" && !state.isLoadingMore) {
       fetch("/api/history", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          username: profile.user.username,
-          full_name: profile.user.full_name,
-          profile_pic_url: profile.user.profile_pic_url,
-          follower_count: profile.user.follower_count,
-          media_count: profile.media.length,
+          username: state.user.username,
+          full_name: state.user.full_name,
+          profile_pic_url: state.user.profile_pic_url,
+          follower_count: state.user.follower_count,
+          media_count: state.allMedia.length,
           session_id: crypto.randomUUID(),
         }),
       }).catch(() => {});
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.status]);
 
   const handleDownloadSelected = useCallback(() => {
     if (state.status !== "success") return;
-    downloadSelected(state.profile.media);
+    downloadSelected(state.allMedia);
   }, [state, downloadSelected]);
 
   const isLoading = state.status === "loading";
   const loadingLabel = isLoading
-    ? LOADING_STEPS[Math.floor(Date.now() / 1000) % LOADING_STEPS.length]
+    ? LOADING_STEPS[Math.floor(Date.now() / 1500) % LOADING_STEPS.length]
     : undefined;
 
   return (
@@ -75,11 +75,7 @@ export default function Home() {
       <main className="pb-20">
         <AnimatePresence mode="wait">
           {state.status !== "success" && (
-            <motion.div
-              key="hero"
-              initial={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-            >
+            <motion.div key="hero" initial={{ opacity: 1 }} exit={{ opacity: 0 }}>
               <Hero />
             </motion.div>
           )}
@@ -120,15 +116,15 @@ export default function Home() {
               className="space-y-6"
             >
               <ProfileHeader
-                user={state.profile.user}
-                mediaCount={state.profile.media.length}
+                user={state.user}
+                mediaCount={state.allMedia.length}
               />
 
-              {state.profile.media.length > 0 ? (
+              {state.allMedia.length > 0 ? (
                 <>
                   <DownloadPanel
                     selectedCount={selected.size}
-                    totalCount={state.profile.media.length}
+                    totalCount={state.allMedia.length}
                     zipState={zipState}
                     onDownloadSelected={handleDownloadSelected}
                     onDownloadAll={handleDownloadSelected}
@@ -136,13 +132,18 @@ export default function Home() {
                   />
 
                   <MediaGrid
-                    media={state.profile.media}
+                    media={state.allMedia}
                     selected={selected}
                     downloads={downloads}
                     onSelect={toggleSelect}
                     onDownload={downloadOne}
-                    onSelectAll={() => selectAll(state.profile.media)}
+                    onSelectAll={() => selectAll(state.allMedia)}
                     onClearSelected={clearSelected}
+                    hasMore={state.hasMore}
+                    isLoadingMore={state.isLoadingMore}
+                    loadedCount={state.allMedia.length}
+                    totalCount={state.totalCount}
+                    onLoadMore={loadMore}
                   />
                 </>
               ) : (
@@ -151,7 +152,7 @@ export default function Home() {
                     <p className="text-text-secondary">
                       Aucun média accessible sur ce profil.
                     </p>
-                    {state.profile.user.is_private && (
+                    {state.user.is_private && (
                       <p className="mt-2 text-sm text-text-muted">
                         Ce compte est privé — seuls les médias publics sont accessibles.
                       </p>
@@ -174,12 +175,10 @@ export default function Home() {
       {/* Footer */}
       <footer className="border-t border-border py-8 text-center text-xs text-text-muted">
         <p>
-          InstaGrab — Cet outil utilise uniquement les données publiques
-          d&apos;Instagram.
+          InstaGrab — Cet outil utilise uniquement les données publiques d&apos;Instagram.
         </p>
         <p className="mt-1">
-          Respectez les conditions d&apos;utilisation d&apos;Instagram et les
-          droits d&apos;auteur des créateurs.
+          Respectez les conditions d&apos;utilisation d&apos;Instagram et les droits d&apos;auteur des créateurs.
         </p>
       </footer>
     </div>

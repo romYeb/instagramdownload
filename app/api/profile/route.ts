@@ -1,14 +1,39 @@
 import { NextRequest, NextResponse } from "next/server";
-import { fetchInstagramProfile } from "@/lib/instagram";
+import { fetchInstagramProfile, fetchNextPage } from "@/lib/instagram";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
-  const username = request.nextUrl.searchParams.get("username");
+  const { searchParams } = request.nextUrl;
+  const username = searchParams.get("username");
+  const userId = searchParams.get("userId");
+  const cursor = searchParams.get("cursor");
 
+  // ── Pagination request ─────────────────────────────────────────────────────
+  if (userId && cursor) {
+    if (!/^\d+$/.test(userId)) {
+      return NextResponse.json({ error: "Invalid userId" }, { status: 400 });
+    }
+
+    try {
+      const result = await fetchNextPage(userId, cursor);
+      return NextResponse.json(result);
+    } catch (error) {
+      return NextResponse.json(
+        {
+          error: "Pagination failed. Instagram may be rate-limiting this request.",
+          code: "PAGINATION_ERROR",
+          details: error instanceof Error ? error.message : String(error),
+        },
+        { status: 503 }
+      );
+    }
+  }
+
+  // ── Initial profile fetch ──────────────────────────────────────────────────
   if (!username) {
-    return NextResponse.json({ error: "Username is required" }, { status: 400 });
+    return NextResponse.json({ error: "username or (userId + cursor) required" }, { status: 400 });
   }
 
   const clean = username.replace(/[^a-zA-Z0-9._]/g, "").toLowerCase();
@@ -28,7 +53,6 @@ export async function GET(request: NextRequest) {
         { status: 403 }
       );
     }
-
     if (message.includes("404") || message.includes("not found")) {
       return NextResponse.json(
         { error: "Account not found", code: "NOT_FOUND" },

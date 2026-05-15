@@ -2,7 +2,7 @@ import type { InstagramProfile, InstagramMedia, MediaType } from "@/types/instag
 
 const IG_APP_ID = "936619743392459";
 
-const BROWSER_HEADERS = {
+export const BROWSER_HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   Accept: "*/*",
@@ -17,6 +17,8 @@ const BROWSER_HEADERS = {
   "Sec-Fetch-Mode": "cors",
   "Sec-Fetch-Site": "same-origin",
 };
+
+// ─── Parsers ──────────────────────────────────────────────────────────────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function parseMediaNode(node: any): InstagramMedia {
@@ -60,14 +62,62 @@ function parseMediaNode(node: any): InstagramMedia {
   };
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function parseFeedItem(item: any): InstagramMedia {
+  const mediaType: number = item.media_type;
+  let type: MediaType = "image";
+
+  if (mediaType === 2) {
+    type = item.product_type === "clips" ? "reel" : "video";
+  } else if (mediaType === 8) {
+    type = "carousel";
+  }
+
+  const url =
+    item.image_versions2?.candidates?.[0]?.url ||
+    item.carousel_media?.[0]?.image_versions2?.candidates?.[0]?.url ||
+    "";
+  const videoUrl = item.video_versions?.[0]?.url;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const children = item.carousel_media?.map((child: any) => ({
+    id: child.id || child.pk,
+    type: child.media_type === 2 ? "video" : "image",
+    url: child.image_versions2?.candidates?.[0]?.url || "",
+    thumbnail_url: child.image_versions2?.candidates?.[0]?.url || "",
+    video_url: child.video_versions?.[0]?.url,
+    dimensions:
+      child.original_width
+        ? { width: child.original_width, height: child.original_height }
+        : undefined,
+  }));
+
+  return {
+    id: String(item.pk || item.id),
+    shortcode: item.code || item.shortcode || "",
+    type,
+    url,
+    thumbnail_url: url,
+    video_url: videoUrl,
+    caption: item.caption?.text,
+    timestamp: item.taken_at,
+    like_count: item.like_count ?? 0,
+    comment_count: item.comment_count ?? 0,
+    children,
+    dimensions:
+      item.original_width
+        ? { width: item.original_width, height: item.original_height }
+        : undefined,
+    duration: item.video_duration,
+    is_reel: type === "reel",
+  };
+}
+
+// ─── First page ───────────────────────────────────────────────────────────────
+
 async function fetchViaWebProfileInfo(username: string): Promise<InstagramProfile> {
   const url = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
-
-  const res = await fetch(url, {
-    headers: BROWSER_HEADERS,
-    cache: "no-store",
-  });
-
+  const res = await fetch(url, { headers: BROWSER_HEADERS, cache: "no-store" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
   const json = await res.json();
@@ -99,21 +149,14 @@ async function fetchViaWebProfileInfo(username: string): Promise<InstagramProfil
   };
 }
 
-async function fetchViaGraphQL(username: string): Promise<InstagramProfile> {
-  // Get user ID first via the /web_profile_info endpoint JSON variant
-  const userRes = await fetch(
+async function fetchViaGraphQLLegacy(username: string): Promise<InstagramProfile> {
+  const res = await fetch(
     `https://www.instagram.com/${encodeURIComponent(username)}/?__a=1&__d=dis`,
-    {
-      headers: {
-        ...BROWSER_HEADERS,
-        Accept: "application/json",
-      },
-      cache: "no-store",
-    }
+    { headers: { ...BROWSER_HEADERS, Accept: "application/json" }, cache: "no-store" }
   );
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-  if (!userRes.ok) throw new Error(`HTTP ${userRes.status}`);
-  const data = await userRes.json();
+  const data = await res.json();
   const user = data?.graphql?.user ?? data?.user;
   if (!user) throw new Error("No user data in GraphQL response");
 
@@ -144,23 +187,82 @@ async function fetchViaGraphQL(username: string): Promise<InstagramProfile> {
 export async function fetchInstagramProfile(username: string): Promise<InstagramProfile> {
   const errors: string[] = [];
 
-  // Strategy 1: Web profile info API
   try {
     return await fetchViaWebProfileInfo(username);
   } catch (e) {
     errors.push(`WebProfileInfo: ${e instanceof Error ? e.message : e}`);
   }
 
-  // Strategy 2: Legacy GraphQL endpoint
   try {
-    return await fetchViaGraphQL(username);
+    return await fetchViaGraphQLLegacy(username);
   } catch (e) {
     errors.push(`GraphQL: ${e instanceof Error ? e.message : e}`);
   }
 
   throw new Error(
     `Unable to fetch Instagram profile for @${username}. ` +
-      `Instagram may require authentication or is blocking this request. ` +
       `Details: ${errors.join("; ")}`
   );
+}
+
+// ─── Pagination ───────────────────────────────────────────────────────────────
+
+export interface PageResult {
+  media: InstagramMedia[];
+  has_next_page: boolean;
+  end_cursor?: string;
+}
+
+async function fetchNextPageViaGraphQL(userId: string, cursor: string): Promise<PageResult> {
+  const variables = JSON.stringify({ id: userId, first: 12, after: cursor });
+  const url = `https://www.instagram.com/graphql/query/?query_hash=8c2a529969ee035a5063f2fc8602a0fd&variables=${encodeURIComponent(variables)}`;
+
+  const res = await fetch(url, { headers: BROWSER_HEADERS, cache: "no-store" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  const json = await res.json();
+  const timeline = json?.data?.user?.edge_owner_to_timeline_media;
+  if (!timeline) throw new Error("No timeline data in GraphQL response");
+
+  return {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    media: timeline.edges.map((e: any) => parseMediaNode(e.node)),
+    has_next_page: timeline.page_info.has_next_page ?? false,
+    end_cursor: timeline.page_info.end_cursor,
+  };
+}
+
+async function fetchNextPageViaUserFeed(userId: string, cursor: string): Promise<PageResult> {
+  const url = `https://www.instagram.com/api/v1/feed/user/${userId}/?count=12&max_id=${encodeURIComponent(cursor)}`;
+
+  const res = await fetch(url, { headers: BROWSER_HEADERS, cache: "no-store" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  const json = await res.json();
+  if (!Array.isArray(json.items)) throw new Error("No items array in user feed response");
+
+  return {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    media: json.items.map((item: any) => parseFeedItem(item)),
+    has_next_page: json.more_available ?? false,
+    end_cursor: json.next_max_id,
+  };
+}
+
+export async function fetchNextPage(userId: string, cursor: string): Promise<PageResult> {
+  const errors: string[] = [];
+
+  try {
+    return await fetchNextPageViaGraphQL(userId, cursor);
+  } catch (e) {
+    errors.push(`GraphQL: ${e instanceof Error ? e.message : e}`);
+  }
+
+  try {
+    return await fetchNextPageViaUserFeed(userId, cursor);
+  } catch (e) {
+    errors.push(`UserFeed: ${e instanceof Error ? e.message : e}`);
+  }
+
+  throw new Error(`Pagination failed: ${errors.join("; ")}`);
 }

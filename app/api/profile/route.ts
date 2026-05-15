@@ -10,6 +10,9 @@ export async function GET(request: NextRequest) {
   const userId = searchParams.get("userId");
   const cursor = searchParams.get("cursor");
 
+  // Read Instagram access token from httpOnly cookie (set after OAuth)
+  const token = request.cookies.get("ig_access_token")?.value;
+
   // ── Pagination request ─────────────────────────────────────────────────────
   if (userId && cursor) {
     if (!/^\d+$/.test(userId)) {
@@ -17,7 +20,7 @@ export async function GET(request: NextRequest) {
     }
 
     try {
-      const result = await fetchNextPage(userId, cursor);
+      const result = await fetchNextPage(userId, cursor, token);
       return NextResponse.json(result);
     } catch (error) {
       return NextResponse.json(
@@ -42,7 +45,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const profile = await fetchInstagramProfile(clean);
+    const profile = await fetchInstagramProfile(clean, token);
     return NextResponse.json(profile);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";

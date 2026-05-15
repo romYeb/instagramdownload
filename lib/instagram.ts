@@ -2,6 +2,18 @@ import type { InstagramProfile, InstagramMedia, MediaType } from "@/types/instag
 
 const IG_APP_ID = "936619743392459";
 
+export function makeHeaders(token?: string): Record<string, string> {
+  return {
+    ...BROWSER_HEADERS,
+    ...(token
+      ? {
+          Authorization: `Bearer ${token}`,
+          "X-IG-Authorization": `Bearer ${token}`,
+        }
+      : {}),
+  };
+}
+
 export const BROWSER_HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -115,9 +127,9 @@ function parseFeedItem(item: any): InstagramMedia {
 
 // ─── First page ───────────────────────────────────────────────────────────────
 
-async function fetchViaWebProfileInfo(username: string): Promise<InstagramProfile> {
+async function fetchViaWebProfileInfo(username: string, token?: string): Promise<InstagramProfile> {
   const url = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
-  const res = await fetch(url, { headers: BROWSER_HEADERS, cache: "no-store" });
+  const res = await fetch(url, { headers: makeHeaders(token), cache: "no-store" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
   const json = await res.json();
@@ -149,10 +161,10 @@ async function fetchViaWebProfileInfo(username: string): Promise<InstagramProfil
   };
 }
 
-async function fetchViaGraphQLLegacy(username: string): Promise<InstagramProfile> {
+async function fetchViaGraphQLLegacy(username: string, token?: string): Promise<InstagramProfile> {
   const res = await fetch(
     `https://www.instagram.com/${encodeURIComponent(username)}/?__a=1&__d=dis`,
-    { headers: { ...BROWSER_HEADERS, Accept: "application/json" }, cache: "no-store" }
+    { headers: { ...makeHeaders(token), Accept: "application/json" }, cache: "no-store" }
   );
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -184,17 +196,17 @@ async function fetchViaGraphQLLegacy(username: string): Promise<InstagramProfile
   };
 }
 
-export async function fetchInstagramProfile(username: string): Promise<InstagramProfile> {
+export async function fetchInstagramProfile(username: string, token?: string): Promise<InstagramProfile> {
   const errors: string[] = [];
 
   try {
-    return await fetchViaWebProfileInfo(username);
+    return await fetchViaWebProfileInfo(username, token);
   } catch (e) {
     errors.push(`WebProfileInfo: ${e instanceof Error ? e.message : e}`);
   }
 
   try {
-    return await fetchViaGraphQLLegacy(username);
+    return await fetchViaGraphQLLegacy(username, token);
   } catch (e) {
     errors.push(`GraphQL: ${e instanceof Error ? e.message : e}`);
   }
@@ -213,11 +225,11 @@ export interface PageResult {
   end_cursor?: string;
 }
 
-async function fetchNextPageViaGraphQL(userId: string, cursor: string): Promise<PageResult> {
+async function fetchNextPageViaGraphQL(userId: string, cursor: string, token?: string): Promise<PageResult> {
   const variables = JSON.stringify({ id: userId, first: 12, after: cursor });
   const url = `https://www.instagram.com/graphql/query/?query_hash=8c2a529969ee035a5063f2fc8602a0fd&variables=${encodeURIComponent(variables)}`;
 
-  const res = await fetch(url, { headers: BROWSER_HEADERS, cache: "no-store" });
+  const res = await fetch(url, { headers: makeHeaders(token), cache: "no-store" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
   const json = await res.json();
@@ -232,10 +244,10 @@ async function fetchNextPageViaGraphQL(userId: string, cursor: string): Promise<
   };
 }
 
-async function fetchNextPageViaUserFeed(userId: string, cursor: string): Promise<PageResult> {
+async function fetchNextPageViaUserFeed(userId: string, cursor: string, token?: string): Promise<PageResult> {
   const url = `https://www.instagram.com/api/v1/feed/user/${userId}/?count=12&max_id=${encodeURIComponent(cursor)}`;
 
-  const res = await fetch(url, { headers: BROWSER_HEADERS, cache: "no-store" });
+  const res = await fetch(url, { headers: makeHeaders(token), cache: "no-store" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
   const json = await res.json();
@@ -249,17 +261,17 @@ async function fetchNextPageViaUserFeed(userId: string, cursor: string): Promise
   };
 }
 
-export async function fetchNextPage(userId: string, cursor: string): Promise<PageResult> {
+export async function fetchNextPage(userId: string, cursor: string, token?: string): Promise<PageResult> {
   const errors: string[] = [];
 
   try {
-    return await fetchNextPageViaGraphQL(userId, cursor);
+    return await fetchNextPageViaGraphQL(userId, cursor, token);
   } catch (e) {
     errors.push(`GraphQL: ${e instanceof Error ? e.message : e}`);
   }
 
   try {
-    return await fetchNextPageViaUserFeed(userId, cursor);
+    return await fetchNextPageViaUserFeed(userId, cursor, token);
   } catch (e) {
     errors.push(`UserFeed: ${e instanceof Error ? e.message : e}`);
   }

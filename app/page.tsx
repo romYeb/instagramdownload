@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Navbar } from "@/components/Navbar";
 import { Hero } from "@/components/Hero";
@@ -8,9 +8,11 @@ import { ProfileHeader } from "@/components/ProfileHeader";
 import { MediaGrid } from "@/components/MediaGrid";
 import { DownloadPanel } from "@/components/DownloadPanel";
 import { HistorySection } from "@/components/HistorySection";
+import { AuthGate } from "@/components/AuthGate";
 import { PulseLoader } from "@/components/ui/Spinner";
 import { useInstagram } from "@/hooks/useInstagram";
 import { useDownload } from "@/hooks/useDownload";
+import { useAuth } from "@/hooks/useAuth";
 
 const LOADING_STEPS = [
   "Connexion à Instagram...",
@@ -21,6 +23,8 @@ const LOADING_STEPS = [
 
 export default function Home() {
   const { state, analyze, loadMore, reset } = useInstagram();
+  const { auth, isAuthenticated, login, logout } = useAuth();
+  const resumedRef = useRef(false);
 
   const username =
     state.status === "success" || state.status === "loading"
@@ -39,7 +43,20 @@ export default function Home() {
     cancelZip,
   } = useDownload(username);
 
-  // Save to history when profile loads (only once, on first media load)
+  // Auto-resume after OAuth callback: ?auth=success&target=username
+  useEffect(() => {
+    if (resumedRef.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const authResult = params.get("auth");
+    const target = params.get("target");
+    if (authResult === "success" && target) {
+      resumedRef.current = true;
+      window.history.replaceState({}, "", "/");
+      analyze(target);
+    }
+  }, [analyze]);
+
+  // Save to history on initial profile load
   useEffect(() => {
     if (state.status === "success" && !state.isLoadingMore) {
       fetch("/api/history", {
@@ -64,13 +81,22 @@ export default function Home() {
   }, [state, downloadSelected]);
 
   const isLoading = state.status === "loading";
-  const loadingLabel = isLoading
-    ? LOADING_STEPS[Math.floor(Date.now() / 1500) % LOADING_STEPS.length]
-    : undefined;
+  const loadingStepIdx = Math.floor(Date.now() / 1500) % LOADING_STEPS.length;
+
+  // Whether to show the AuthGate:
+  // show when there are more posts AND user is not authenticated
+  const showAuthGate =
+    state.status === "success" &&
+    state.hasMore &&
+    !isAuthenticated &&
+    auth.status !== "loading";
+
+  // Whether pagination is allowed to proceed (either auth'd or still trying anon)
+  const canLoadMore = state.status === "success" && state.hasMore && isAuthenticated;
 
   return (
     <div className="min-h-screen bg-background">
-      <Navbar />
+      <Navbar auth={auth} onLogout={logout} />
 
       <main className="pb-20">
         <AnimatePresence mode="wait">
@@ -81,7 +107,7 @@ export default function Home() {
           )}
         </AnimatePresence>
 
-        {/* URL Input — always visible */}
+        {/* URL Input */}
         <div className={state.status === "success" ? "pt-20 pb-6" : "pb-10"}>
           <URLInput
             onAnalyze={analyze}
@@ -91,7 +117,7 @@ export default function Home() {
           />
         </div>
 
-        {/* Loading state */}
+        {/* Loading */}
         <AnimatePresence>
           {isLoading && (
             <motion.div
@@ -101,12 +127,12 @@ export default function Home() {
               exit={{ opacity: 0 }}
               className="flex justify-center py-16"
             >
-              <PulseLoader label={loadingLabel} />
+              <PulseLoader label={LOADING_STEPS[loadingStepIdx]} />
             </motion.div>
           )}
         </AnimatePresence>
 
-        {/* Success state */}
+        {/* Results */}
         <AnimatePresence>
           {state.status === "success" && (
             <motion.div
@@ -139,12 +165,34 @@ export default function Home() {
                     onDownload={downloadOne}
                     onSelectAll={() => selectAll(state.allMedia)}
                     onClearSelected={clearSelected}
-                    hasMore={state.hasMore}
+                    // Only allow auto-pagination if authenticated
+                    hasMore={canLoadMore}
                     isLoadingMore={state.isLoadingMore}
                     loadedCount={state.allMedia.length}
                     totalCount={state.totalCount}
                     onLoadMore={loadMore}
                   />
+
+                  {/* Auth Gate — shown after grid when more content is locked */}
+                  <AnimatePresence>
+                    {showAuthGate && (
+                      <motion.div
+                        key="authgate"
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0 }}
+                      >
+                        <AuthGate
+                          auth={auth}
+                          targetUsername={state.user.username}
+                          totalCount={state.totalCount}
+                          loadedCount={state.allMedia.length}
+                          onLogin={login}
+                          onLogout={logout}
+                        />
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </>
               ) : (
                 <div className="mx-auto max-w-4xl px-4">
@@ -172,13 +220,14 @@ export default function Home() {
         )}
       </main>
 
-      {/* Footer */}
       <footer className="border-t border-border py-8 text-center text-xs text-text-muted">
         <p>
-          InstaGrab — Cet outil utilise uniquement les données publiques d&apos;Instagram.
+          InstaGrab — Cet outil utilise uniquement les données publiques
+          d&apos;Instagram.
         </p>
         <p className="mt-1">
-          Respectez les conditions d&apos;utilisation d&apos;Instagram et les droits d&apos;auteur des créateurs.
+          Respectez les conditions d&apos;utilisation d&apos;Instagram et les
+          droits d&apos;auteur des créateurs.
         </p>
       </footer>
     </div>

@@ -23,15 +23,24 @@ type State =
 export function useInstagram() {
   const [state, setState] = useState<State>({ status: "idle" });
   const pendingMore = useRef(false);
+  const stateRef = useRef<State>({ status: "idle" });
+
+  const set = useCallback((updater: State | ((prev: State) => State)) => {
+    setState((prev) => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      stateRef.current = next;
+      return next;
+    });
+  }, []);
 
   const analyze = useCallback(async (input: string) => {
     const username = extractUsername(input);
     if (!username) {
-      setState({ status: "error", message: "Lien ou nom d'utilisateur Instagram invalide." });
+      set({ status: "error", message: "Lien ou nom d'utilisateur Instagram invalide." });
       return;
     }
 
-    setState({ status: "loading", username });
+    set({ status: "loading", username });
     pendingMore.current = false;
 
     try {
@@ -39,11 +48,11 @@ export function useInstagram() {
       const json = await res.json();
 
       if (!res.ok) {
-        setState({ status: "error", message: json.error ?? "Impossible d'analyser ce profil.", code: json.code });
+        set({ status: "error", message: json.error ?? "Impossible d'analyser ce profil.", code: json.code });
         return;
       }
 
-      setState({
+      set({
         status: "success",
         username,
         user: json.user,
@@ -54,42 +63,36 @@ export function useInstagram() {
         isLoadingMore: false,
       });
     } catch {
-      setState({ status: "error", message: "Erreur réseau. Vérifiez votre connexion et réessayez." });
+      set({ status: "error", message: "Erreur réseau. Vérifiez votre connexion et réessayez." });
     }
-  }, []);
+  }, [set]);
 
   const loadMore = useCallback(async () => {
     if (pendingMore.current) return;
 
-    setState((prev) => {
+    set((prev) => {
       if (prev.status !== "success" || !prev.hasMore || !prev.cursor) return prev;
       pendingMore.current = true;
       return { ...prev, isLoadingMore: true };
     });
 
-    // Read current state synchronously via a snapshot
-    let snap: SuccessState | null = null;
-    setState((prev) => {
-      if (prev.status === "success") snap = prev;
-      return prev;
-    });
-
-    if (!snap || !(snap as SuccessState).cursor || !(snap as SuccessState).hasMore) {
+    const snap = stateRef.current;
+    if (snap.status !== "success" || !snap.cursor || !snap.hasMore) {
       pendingMore.current = false;
       return;
     }
 
-    const { user, cursor } = snap as SuccessState;
+    const { user, cursor } = snap;
 
     try {
       const res = await fetch(
-        `/api/profile?userId=${encodeURIComponent(user.id)}&cursor=${encodeURIComponent(cursor!)}`
+        `/api/profile?userId=${encodeURIComponent(user.id)}&cursor=${encodeURIComponent(cursor)}`
       );
       const json = await res.json();
 
       if (!res.ok) throw new Error(json.error ?? "Pagination error");
 
-      setState((prev) => {
+      set((prev) => {
         if (prev.status !== "success") return prev;
         const existingIds = new Set(prev.allMedia.map((m) => m.id));
         const newMedia = (json.media as InstagramMedia[]).filter((m) => !existingIds.has(m.id));
@@ -102,18 +105,30 @@ export function useInstagram() {
         };
       });
     } catch {
-      setState((prev) =>
+      set((prev) =>
         prev.status === "success" ? { ...prev, isLoadingMore: false } : prev
       );
     } finally {
       pendingMore.current = false;
     }
-  }, []);
+  }, [set]);
+
+  const loadAll = useCallback(async () => {
+    const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    while (true) {
+      const s = stateRef.current;
+      if (s.status !== "success" || !s.hasMore || !s.cursor) break;
+      if (pendingMore.current) { await wait(300); continue; }
+      loadMore();
+      await wait(300);
+      while (pendingMore.current) await wait(300);
+    }
+  }, [loadMore]);
 
   const reset = useCallback(() => {
     pendingMore.current = false;
-    setState({ status: "idle" });
-  }, []);
+    set({ status: "idle" });
+  }, [set]);
 
-  return { state, analyze, loadMore, reset };
+  return { state, analyze, loadMore, loadAll, reset };
 }

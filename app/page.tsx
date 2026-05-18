@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Navbar } from "@/components/Navbar";
 import { Hero } from "@/components/Hero";
@@ -8,11 +8,9 @@ import { ProfileHeader } from "@/components/ProfileHeader";
 import { MediaGrid } from "@/components/MediaGrid";
 import { DownloadPanel } from "@/components/DownloadPanel";
 import { HistorySection } from "@/components/HistorySection";
-import { AuthGate } from "@/components/AuthGate";
 import { PulseLoader } from "@/components/ui/Spinner";
 import { useInstagram } from "@/hooks/useInstagram";
 import { useDownload } from "@/hooks/useDownload";
-import { useAuth } from "@/hooks/useAuth";
 
 const LOADING_STEPS = [
   "Connexion à Instagram...",
@@ -22,9 +20,7 @@ const LOADING_STEPS = [
 ];
 
 export default function Home() {
-  const { state, analyze, loadMore, reset } = useInstagram();
-  const { auth, isAuthenticated, login, logout } = useAuth();
-  const resumedRef = useRef(false);
+  const { state, analyze, loadMore, loadAll, reset } = useInstagram();
 
   const username =
     state.status === "success" || state.status === "loading"
@@ -42,19 +38,6 @@ export default function Home() {
     clearSelected,
     cancelZip,
   } = useDownload(username);
-
-  // Auto-resume after OAuth callback: ?auth=success&target=username
-  useEffect(() => {
-    if (resumedRef.current) return;
-    const params = new URLSearchParams(window.location.search);
-    const authResult = params.get("auth");
-    const target = params.get("target");
-    if (authResult === "success" && target) {
-      resumedRef.current = true;
-      window.history.replaceState({}, "", "/");
-      analyze(target);
-    }
-  }, [analyze]);
 
   // Save to history on initial profile load
   useEffect(() => {
@@ -82,21 +65,11 @@ export default function Home() {
 
   const isLoading = state.status === "loading";
   const loadingStepIdx = Math.floor(Date.now() / 1500) % LOADING_STEPS.length;
-
-  // Whether to show the AuthGate:
-  // show when there are more posts AND user is not authenticated
-  const showAuthGate =
-    state.status === "success" &&
-    state.hasMore &&
-    !isAuthenticated &&
-    auth.status !== "loading";
-
-  // Whether pagination is allowed to proceed (either auth'd or still trying anon)
-  const canLoadMore = state.status === "success" && state.hasMore && isAuthenticated;
+  const canLoadMore = state.status === "success" && state.hasMore;
 
   return (
     <div className="min-h-screen bg-background">
-      <Navbar auth={auth} onLogout={logout} />
+      <Navbar />
 
       <main className="pb-20">
         <AnimatePresence mode="wait">
@@ -165,34 +138,13 @@ export default function Home() {
                     onDownload={downloadOne}
                     onSelectAll={() => selectAll(state.allMedia)}
                     onClearSelected={clearSelected}
-                    // Only allow auto-pagination if authenticated
                     hasMore={canLoadMore}
                     isLoadingMore={state.isLoadingMore}
                     loadedCount={state.allMedia.length}
                     totalCount={state.totalCount}
                     onLoadMore={loadMore}
+                    onLoadAll={loadAll}
                   />
-
-                  {/* Auth Gate — shown after grid when more content is locked */}
-                  <AnimatePresence>
-                    {showAuthGate && (
-                      <motion.div
-                        key="authgate"
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0 }}
-                      >
-                        <AuthGate
-                          auth={auth}
-                          targetUsername={state.user.username}
-                          totalCount={state.totalCount}
-                          loadedCount={state.allMedia.length}
-                          onLogin={login}
-                          onLogout={logout}
-                        />
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
                 </>
               ) : (
                 <div className="mx-auto max-w-4xl px-4">

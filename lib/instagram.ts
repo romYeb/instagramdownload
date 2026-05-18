@@ -1,34 +1,46 @@
 import type { InstagramProfile, InstagramMedia, MediaType } from "@/types/instagram";
 
-const IG_APP_ID = "936619743392459";
+// Rotate user agents to reduce rate limiting
+const USER_AGENTS = [
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+];
 
-export function makeHeaders(token?: string): Record<string, string> {
+function randomUA() {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
+
+function makeHeaders(): Record<string, string> {
   return {
-    ...BROWSER_HEADERS,
-    ...(token
-      ? {
-          Authorization: `Bearer ${token}`,
-          "X-IG-Authorization": `Bearer ${token}`,
-        }
-      : {}),
+    "User-Agent": randomUA(),
+    Accept: "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    Referer: "https://www.instagram.com/",
+    Origin: "https://www.instagram.com",
+    "X-IG-App-ID": "936619743392459",
+    "X-ASBD-ID": "198387",
+    "X-IG-WWW-Claim": "0",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
   };
 }
 
-export const BROWSER_HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  Accept: "*/*",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Accept-Encoding": "gzip, deflate, br",
-  Referer: "https://www.instagram.com/",
-  Origin: "https://www.instagram.com",
-  "X-IG-App-ID": IG_APP_ID,
-  "X-ASBD-ID": "198387",
-  "X-IG-WWW-Claim": "0",
-  "Sec-Fetch-Dest": "empty",
-  "Sec-Fetch-Mode": "cors",
-  "Sec-Fetch-Site": "same-origin",
-};
+async function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function fetchWithRetry(url: string, options: RequestInit, retries = 2): Promise<Response> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt > 0) await sleep(1000 * attempt);
+    const res = await fetch(url, { ...options, headers: makeHeaders(), cache: "no-store" });
+    if (res.status === 429 && attempt < retries) continue; // rate limited, retry
+    return res;
+  }
+  throw new Error("Max retries exceeded");
+}
 
 // ─── Parsers ──────────────────────────────────────────────────────────────────
 
@@ -127,9 +139,9 @@ function parseFeedItem(item: any): InstagramMedia {
 
 // ─── First page ───────────────────────────────────────────────────────────────
 
-async function fetchViaWebProfileInfo(username: string, token?: string): Promise<InstagramProfile> {
+async function fetchViaWebProfileInfo(username: string): Promise<InstagramProfile> {
   const url = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
-  const res = await fetch(url, { headers: makeHeaders(token), cache: "no-store" });
+  const res = await fetchWithRetry(url, {});
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
   const json = await res.json();
@@ -161,10 +173,10 @@ async function fetchViaWebProfileInfo(username: string, token?: string): Promise
   };
 }
 
-async function fetchViaGraphQLLegacy(username: string, token?: string): Promise<InstagramProfile> {
-  const res = await fetch(
+async function fetchViaGraphQLLegacy(username: string): Promise<InstagramProfile> {
+  const res = await fetchWithRetry(
     `https://www.instagram.com/${encodeURIComponent(username)}/?__a=1&__d=dis`,
-    { headers: { ...makeHeaders(token), Accept: "application/json" }, cache: "no-store" }
+    { headers: { Accept: "application/json" } }
   );
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -196,17 +208,17 @@ async function fetchViaGraphQLLegacy(username: string, token?: string): Promise<
   };
 }
 
-export async function fetchInstagramProfile(username: string, token?: string): Promise<InstagramProfile> {
+export async function fetchInstagramProfile(username: string): Promise<InstagramProfile> {
   const errors: string[] = [];
 
   try {
-    return await fetchViaWebProfileInfo(username, token);
+    return await fetchViaWebProfileInfo(username);
   } catch (e) {
     errors.push(`WebProfileInfo: ${e instanceof Error ? e.message : e}`);
   }
 
   try {
-    return await fetchViaGraphQLLegacy(username, token);
+    return await fetchViaGraphQLLegacy(username);
   } catch (e) {
     errors.push(`GraphQL: ${e instanceof Error ? e.message : e}`);
   }
@@ -225,11 +237,11 @@ export interface PageResult {
   end_cursor?: string;
 }
 
-async function fetchNextPageViaGraphQL(userId: string, cursor: string, token?: string): Promise<PageResult> {
-  const variables = JSON.stringify({ id: userId, first: 12, after: cursor });
+async function fetchNextPageViaGraphQL(userId: string, cursor: string): Promise<PageResult> {
+  const variables = JSON.stringify({ id: userId, first: 50, after: cursor });
   const url = `https://www.instagram.com/graphql/query/?query_hash=8c2a529969ee035a5063f2fc8602a0fd&variables=${encodeURIComponent(variables)}`;
 
-  const res = await fetch(url, { headers: makeHeaders(token), cache: "no-store" });
+  const res = await fetchWithRetry(url, {});
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
   const json = await res.json();
@@ -244,10 +256,10 @@ async function fetchNextPageViaGraphQL(userId: string, cursor: string, token?: s
   };
 }
 
-async function fetchNextPageViaUserFeed(userId: string, cursor: string, token?: string): Promise<PageResult> {
-  const url = `https://www.instagram.com/api/v1/feed/user/${userId}/?count=12&max_id=${encodeURIComponent(cursor)}`;
+async function fetchNextPageViaUserFeed(userId: string, cursor: string): Promise<PageResult> {
+  const url = `https://www.instagram.com/api/v1/feed/user/${userId}/?count=50&max_id=${encodeURIComponent(cursor)}`;
 
-  const res = await fetch(url, { headers: makeHeaders(token), cache: "no-store" });
+  const res = await fetchWithRetry(url, {});
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
   const json = await res.json();
@@ -261,17 +273,17 @@ async function fetchNextPageViaUserFeed(userId: string, cursor: string, token?: 
   };
 }
 
-export async function fetchNextPage(userId: string, cursor: string, token?: string): Promise<PageResult> {
+export async function fetchNextPage(userId: string, cursor: string): Promise<PageResult> {
   const errors: string[] = [];
 
   try {
-    return await fetchNextPageViaGraphQL(userId, cursor, token);
+    return await fetchNextPageViaGraphQL(userId, cursor);
   } catch (e) {
     errors.push(`GraphQL: ${e instanceof Error ? e.message : e}`);
   }
 
   try {
-    return await fetchNextPageViaUserFeed(userId, cursor, token);
+    return await fetchNextPageViaUserFeed(userId, cursor);
   } catch (e) {
     errors.push(`UserFeed: ${e instanceof Error ? e.message : e}`);
   }

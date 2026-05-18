@@ -22,6 +22,7 @@ interface MediaGridProps {
   loadedCount: number;
   totalCount: number;
   onLoadMore: () => void;
+  onLoadAll: () => void;
 }
 
 const FILTER_LABELS: Record<FilterType, string> = {
@@ -45,6 +46,7 @@ export function MediaGrid({
   loadedCount,
   totalCount,
   onLoadMore,
+  onLoadAll,
 }: MediaGridProps) {
   const [filter, setFilter] = useState<FilterType>("all");
   const [cols, setCols] = useState<3 | 4>(3);
@@ -220,18 +222,28 @@ export function MediaGrid({
         )}
 
         {hasMore && !isLoadingMore && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center gap-2">
-            <Button
-              variant="outline"
-              size="md"
-              onClick={onLoadMore}
-              className="gap-2 min-w-[200px]"
-            >
-              <ChevronDown className="h-4 w-4" />
-              Charger plus de médias
-            </Button>
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center gap-3">
+            <div className="flex gap-3">
+              <Button
+                variant="outline"
+                size="md"
+                onClick={onLoadMore}
+                className="gap-2"
+              >
+                <ChevronDown className="h-4 w-4" />
+                Charger plus
+              </Button>
+              <Button
+                size="md"
+                onClick={onLoadAll}
+                className="gap-2 bg-gradient-purple-blue text-white border-0 hover:opacity-90"
+              >
+                <Loader2 className="h-4 w-4" />
+                Tout charger ({(totalCount - loadedCount).toLocaleString("fr-FR")} restants)
+              </Button>
+            </div>
             <p className="text-xs text-text-muted">
-              {loadedCount} / {totalCount} — {totalCount - loadedCount} restants
+              {loadedCount} / {totalCount} médias
             </p>
           </motion.div>
         )}

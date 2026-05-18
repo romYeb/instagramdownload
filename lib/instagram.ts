@@ -32,11 +32,23 @@ async function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// Route through ScraperAPI on Vercel (Instagram blocks datacenter IPs).
+// Locally, fetch directly (home IP works fine).
+function proxiedUrl(targetUrl: string): string {
+  const key = process.env.SCRAPER_API_KEY;
+  if (!key) return targetUrl;
+  return `http://api.scraperapi.com?api_key=${key}&url=${encodeURIComponent(targetUrl)}&keep_headers=true`;
+}
+
 async function fetchWithRetry(url: string, options: RequestInit, retries = 2): Promise<Response> {
+  const finalUrl = proxiedUrl(url);
+  const isProxy = finalUrl !== url;
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (attempt > 0) await sleep(1000 * attempt);
-    const res = await fetch(url, { ...options, headers: makeHeaders(), cache: "no-store" });
-    if (res.status === 429 && attempt < retries) continue; // rate limited, retry
+    // When proxied, ScraperAPI sets its own headers — no need to add IG headers
+    const headers = isProxy ? {} : makeHeaders();
+    const res = await fetch(finalUrl, { ...options, headers, cache: "no-store" });
+    if (res.status === 429 && attempt < retries) continue;
     return res;
   }
   throw new Error("Max retries exceeded");

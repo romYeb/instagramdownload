@@ -32,22 +32,23 @@ async function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// Route through ScraperAPI on Vercel (Instagram blocks datacenter IPs).
-// Locally, fetch directly (home IP works fine).
-function proxiedUrl(targetUrl: string): string {
-  const key = process.env.SCRAPER_API_KEY;
-  if (!key) return targetUrl;
-  return `http://api.scraperapi.com?api_key=${key}&url=${encodeURIComponent(targetUrl)}&keep_headers=true`;
-}
-
 async function fetchWithRetry(url: string, options: RequestInit, retries = 2): Promise<Response> {
-  const finalUrl = proxiedUrl(url);
-  const isProxy = finalUrl !== url;
+  const key = process.env.SCRAPER_API_KEY;
+
+  // On Vercel (key set): route via ScraperAPI with keep_headers=true
+  // so Instagram headers are forwarded through the proxy.
+  // Locally (no key): fetch Instagram directly.
+  const finalUrl = key
+    ? `http://api.scraperapi.com?api_key=${key}&url=${encodeURIComponent(url)}&keep_headers=true`
+    : url;
+
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (attempt > 0) await sleep(1000 * attempt);
-    // When proxied, ScraperAPI sets its own headers — no need to add IG headers
-    const headers = isProxy ? {} : makeHeaders();
-    const res = await fetch(finalUrl, { ...options, headers, cache: "no-store" });
+    const res = await fetch(finalUrl, {
+      ...options,
+      headers: makeHeaders(), // always send IG headers (ScraperAPI forwards them with keep_headers=true)
+      cache: "no-store",
+    });
     if (res.status === 429 && attempt < retries) continue;
     return res;
   }

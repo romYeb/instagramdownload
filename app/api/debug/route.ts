@@ -1,41 +1,58 @@
 import { NextResponse } from "next/server";
+import axios from "axios";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  const key = process.env.SCRAPER_API_KEY;
+function getProxyConfig() {
+  const raw = process.env.PROXY_URL;
+  if (!raw) return undefined;
+  try {
+    const u = new URL(raw);
+    return {
+      protocol: u.protocol.replace(":", "") as "http" | "https",
+      host: u.hostname,
+      port: parseInt(u.port || "80"),
+      ...(u.username ? { auth: { username: decodeURIComponent(u.username), password: decodeURIComponent(u.password) } } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
 
-  // Test a real ScraperAPI call to Instagram
-  let scraperTest: { status?: number; ok?: boolean; error?: string; body?: string } = {};
-  if (key) {
-    try {
-      const testUrl = "https://www.instagram.com/api/v1/users/web_profile_info/?username=instagram";
-      const proxyUrl = `http://api.scraperapi.com?api_key=${key}&url=${encodeURIComponent(testUrl)}&keep_headers=true`;
-      const res = await fetch(proxyUrl, {
+export async function GET() {
+  const proxyUrl = process.env.PROXY_URL;
+  const proxy = getProxyConfig();
+
+  let igTest: { status?: number; hasData?: boolean; error?: string } = {};
+  try {
+    const res = await axios.get(
+      "https://www.instagram.com/api/v1/users/web_profile_info/?username=instagram",
+      {
         headers: {
           "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
           "X-IG-App-ID": "936619743392459",
           Accept: "*/*",
-          "Accept-Language": "en-US,en;q=0.9",
           Referer: "https://www.instagram.com/",
         },
-        cache: "no-store",
-      });
-      const text = await res.text();
-      scraperTest = {
-        status: res.status,
-        ok: res.ok,
-        body: text.slice(0, 300),
-      };
-    } catch (e) {
-      scraperTest = { error: e instanceof Error ? e.message : String(e) };
-    }
+        proxy: proxy ?? false,
+        timeout: 15000,
+        validateStatus: () => true,
+      }
+    );
+    igTest = {
+      status: res.status,
+      hasData: !!res.data?.data?.user,
+    };
+  } catch (e) {
+    igTest = { error: e instanceof Error ? e.message : String(e) };
   }
 
   return NextResponse.json({
-    SCRAPER_API_KEY_set: !!key,
-    SCRAPER_API_KEY_preview: key ? `${key.slice(0, 6)}...${key.slice(-4)}` : null,
+    PROXY_URL_set: !!proxyUrl,
+    PROXY_URL_preview: proxyUrl
+      ? `${proxyUrl.split("@")[0].split(":")[0]}://${proxyUrl.split("@")[0].split(":")[1]?.replace("//", "")}:***@${proxyUrl.split("@")[1]}`
+      : null,
     NODE_ENV: process.env.NODE_ENV,
-    scraperTest,
+    igTest,
   });
 }

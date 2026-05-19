@@ -1,6 +1,6 @@
+import axios from "axios";
 import type { InstagramProfile, InstagramMedia, MediaType } from "@/types/instagram";
 
-// Rotate user agents to reduce rate limiting
 const USER_AGENTS = [
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
@@ -28,31 +28,46 @@ function makeHeaders(): Record<string, string> {
   };
 }
 
+// Parse PROXY_URL env var (format: http://user:pass@host:port)
+function getProxyConfig() {
+  const raw = process.env.PROXY_URL;
+  if (!raw) return undefined;
+  try {
+    const u = new URL(raw);
+    return {
+      protocol: u.protocol.replace(":", "") as "http" | "https",
+      host: u.hostname,
+      port: parseInt(u.port || "80"),
+      ...(u.username ? { auth: { username: decodeURIComponent(u.username), password: decodeURIComponent(u.password) } } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 async function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function fetchWithRetry(url: string, options: RequestInit, retries = 2): Promise<Response> {
-  const key = process.env.SCRAPER_API_KEY;
-
-  // On Vercel (key set): route via ScraperAPI with keep_headers=true
-  // so Instagram headers are forwarded through the proxy.
-  // Locally (no key): fetch Instagram directly.
-  const finalUrl = key
-    ? `http://api.scraperapi.com?api_key=${key}&url=${encodeURIComponent(url)}&keep_headers=true`
-    : url;
-
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function igGet(url: string, retries = 2): Promise<any> {
+  const proxy = getProxyConfig();
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (attempt > 0) await sleep(1000 * attempt);
-    const res = await fetch(finalUrl, {
-      ...options,
-      headers: makeHeaders(), // always send IG headers (ScraperAPI forwards them with keep_headers=true)
-      cache: "no-store",
-    });
-    if (res.status === 429 && attempt < retries) continue;
-    return res;
+    try {
+      const res = await axios.get(url, {
+        headers: makeHeaders(),
+        proxy: proxy ?? false,
+        timeout: 15000,
+        validateStatus: () => true,
+      });
+      if (res.status === 429 && attempt < retries) continue;
+      if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
+      return res.data;
+    } catch (e) {
+      if (attempt === retries) throw e;
+    }
   }
-  throw new Error("Max retries exceeded");
 }
 
 // ─── Parsers ──────────────────────────────────────────────────────────────────
@@ -114,7 +129,6 @@ function parseFeedItem(item: any): InstagramMedia {
     item.image_versions2?.candidates?.[0]?.url ||
     item.carousel_media?.[0]?.image_versions2?.candidates?.[0]?.url ||
     "";
-  const videoUrl = item.video_versions?.[0]?.url;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const children = item.carousel_media?.map((child: any) => ({
@@ -123,10 +137,9 @@ function parseFeedItem(item: any): InstagramMedia {
     url: child.image_versions2?.candidates?.[0]?.url || "",
     thumbnail_url: child.image_versions2?.candidates?.[0]?.url || "",
     video_url: child.video_versions?.[0]?.url,
-    dimensions:
-      child.original_width
-        ? { width: child.original_width, height: child.original_height }
-        : undefined,
+    dimensions: child.original_width
+      ? { width: child.original_width, height: child.original_height }
+      : undefined,
   }));
 
   return {
@@ -135,30 +148,27 @@ function parseFeedItem(item: any): InstagramMedia {
     type,
     url,
     thumbnail_url: url,
-    video_url: videoUrl,
+    video_url: item.video_versions?.[0]?.url,
     caption: item.caption?.text,
     timestamp: item.taken_at,
     like_count: item.like_count ?? 0,
     comment_count: item.comment_count ?? 0,
     children,
-    dimensions:
-      item.original_width
-        ? { width: item.original_width, height: item.original_height }
-        : undefined,
+    dimensions: item.original_width
+      ? { width: item.original_width, height: item.original_height }
+      : undefined,
     duration: item.video_duration,
     is_reel: type === "reel",
   };
 }
 
-// ─── First page ───────────────────────────────────────────────────────────────
+// ─── Profile ──────────────────────────────────────────────────────────────────
 
 async function fetchViaWebProfileInfo(username: string): Promise<InstagramProfile> {
-  const url = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
-  const res = await fetchWithRetry(url, {});
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-  const json = await res.json();
-  const user = json?.data?.user;
+  const data = await igGet(
+    `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`
+  );
+  const user = data?.data?.user;
   if (!user) throw new Error("No user data");
 
   const edges = user.edge_owner_to_timeline_media?.edges ?? [];
@@ -187,13 +197,9 @@ async function fetchViaWebProfileInfo(username: string): Promise<InstagramProfil
 }
 
 async function fetchViaGraphQLLegacy(username: string): Promise<InstagramProfile> {
-  const res = await fetchWithRetry(
-    `https://www.instagram.com/${encodeURIComponent(username)}/?__a=1&__d=dis`,
-    { headers: { Accept: "application/json" } }
+  const data = await igGet(
+    `https://www.instagram.com/${encodeURIComponent(username)}/?__a=1&__d=dis`
   );
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-  const data = await res.json();
   const user = data?.graphql?.user ?? data?.user;
   if (!user) throw new Error("No user data in GraphQL response");
 
@@ -224,22 +230,13 @@ async function fetchViaGraphQLLegacy(username: string): Promise<InstagramProfile
 export async function fetchInstagramProfile(username: string): Promise<InstagramProfile> {
   const errors: string[] = [];
 
-  try {
-    return await fetchViaWebProfileInfo(username);
-  } catch (e) {
-    errors.push(`WebProfileInfo: ${e instanceof Error ? e.message : e}`);
-  }
+  try { return await fetchViaWebProfileInfo(username); }
+  catch (e) { errors.push(`WebProfileInfo: ${e instanceof Error ? e.message : e}`); }
 
-  try {
-    return await fetchViaGraphQLLegacy(username);
-  } catch (e) {
-    errors.push(`GraphQL: ${e instanceof Error ? e.message : e}`);
-  }
+  try { return await fetchViaGraphQLLegacy(username); }
+  catch (e) { errors.push(`GraphQL: ${e instanceof Error ? e.message : e}`); }
 
-  throw new Error(
-    `Unable to fetch Instagram profile for @${username}. ` +
-      `Details: ${errors.join("; ")}`
-  );
+  throw new Error(`Unable to fetch Instagram profile for @${username}. Details: ${errors.join("; ")}`);
 }
 
 // ─── Pagination ───────────────────────────────────────────────────────────────
@@ -252,14 +249,11 @@ export interface PageResult {
 
 async function fetchNextPageViaGraphQL(userId: string, cursor: string): Promise<PageResult> {
   const variables = JSON.stringify({ id: userId, first: 50, after: cursor });
-  const url = `https://www.instagram.com/graphql/query/?query_hash=8c2a529969ee035a5063f2fc8602a0fd&variables=${encodeURIComponent(variables)}`;
-
-  const res = await fetchWithRetry(url, {});
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-  const json = await res.json();
-  const timeline = json?.data?.user?.edge_owner_to_timeline_media;
-  if (!timeline) throw new Error("No timeline data in GraphQL response");
+  const data = await igGet(
+    `https://www.instagram.com/graphql/query/?query_hash=8c2a529969ee035a5063f2fc8602a0fd&variables=${encodeURIComponent(variables)}`
+  );
+  const timeline = data?.data?.user?.edge_owner_to_timeline_media;
+  if (!timeline) throw new Error("No timeline data");
 
   return {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -270,36 +264,27 @@ async function fetchNextPageViaGraphQL(userId: string, cursor: string): Promise<
 }
 
 async function fetchNextPageViaUserFeed(userId: string, cursor: string): Promise<PageResult> {
-  const url = `https://www.instagram.com/api/v1/feed/user/${userId}/?count=50&max_id=${encodeURIComponent(cursor)}`;
-
-  const res = await fetchWithRetry(url, {});
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-  const json = await res.json();
-  if (!Array.isArray(json.items)) throw new Error("No items array in user feed response");
+  const data = await igGet(
+    `https://www.instagram.com/api/v1/feed/user/${userId}/?count=50&max_id=${encodeURIComponent(cursor)}`
+  );
+  if (!Array.isArray(data.items)) throw new Error("No items array");
 
   return {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    media: json.items.map((item: any) => parseFeedItem(item)),
-    has_next_page: json.more_available ?? false,
-    end_cursor: json.next_max_id,
+    media: data.items.map((item: any) => parseFeedItem(item)),
+    has_next_page: data.more_available ?? false,
+    end_cursor: data.next_max_id,
   };
 }
 
 export async function fetchNextPage(userId: string, cursor: string): Promise<PageResult> {
   const errors: string[] = [];
 
-  try {
-    return await fetchNextPageViaGraphQL(userId, cursor);
-  } catch (e) {
-    errors.push(`GraphQL: ${e instanceof Error ? e.message : e}`);
-  }
+  try { return await fetchNextPageViaGraphQL(userId, cursor); }
+  catch (e) { errors.push(`GraphQL: ${e instanceof Error ? e.message : e}`); }
 
-  try {
-    return await fetchNextPageViaUserFeed(userId, cursor);
-  } catch (e) {
-    errors.push(`UserFeed: ${e instanceof Error ? e.message : e}`);
-  }
+  try { return await fetchNextPageViaUserFeed(userId, cursor); }
+  catch (e) { errors.push(`UserFeed: ${e instanceof Error ? e.message : e}`); }
 
   throw new Error(`Pagination failed: ${errors.join("; ")}`);
 }

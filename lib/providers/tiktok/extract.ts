@@ -1,0 +1,333 @@
+/**
+ * lib/providers/tiktok/extract.ts
+ * ─────────────────────────────────────────────────────────────
+ * Point d'entrée du provider TikTok.
+ *
+ * ─── CORRECTION DU BUG PRINCIPAL ────────────────────────────
+ * Avant : fetchTikTokMedia() appelait l'API single-video sur TOUTES les URLs,
+ *         y compris les URLs de profil (@username) → 1 seule vidéo, aperçu cassé.
+ *
+ * Après : on détecte si l'URL est un profil ou une vidéo, et on appelle
+ *         la bonne API tikwm.com dans chaque cas.
+ *
+ * Flux pour un PROFIL :
+ *   1. fetchTikTokUserInfo()  → avatar, bio, stats
+ *   2. fetchTikTokUserPosts() → liste paginée des vidéos
+ *   → parseTikWmProfileToUnified()
+ *
+ * Flux pour une VIDÉO :
+ *   1. fetchViaTikWm()       → vidéo + metadata
+ *   2. fetchViaOEmbed()      → fallback metadata
+ *   3. fetchViaHtmlParsing() → fallback HTML
+ */
+
+import {
+  resolveTikTokUrl,
+  fetchViaTikWm,
+  fetchViaOEmbed,
+  fetchViaHtmlParsing,
+  fetchTikTokUserInfo,
+  fetchTikTokUserPosts,
+  fetchTikTokProfileFromHtml,
+  fetchTikTokVideosByUserId,
+} from "./api";
+import {
+  parseTikWmToProfile,
+  parseOEmbedToProfile,
+  parseHtmlDataToProfile,
+  parseTikWmProfileToUnified,
+  parseTikWmPostItem,
+  parseTikTokAwemeItem,
+} from "./parser";
+import {
+  isTikTokProfileUrl,
+  isTikTokVideoUrl,
+  extractTikTokUsername,
+  getTikTokUrlKind,
+} from "@/lib/utils/platform";
+import type { UnifiedProfile, UnifiedMedia } from "@/types/media";
+import type { MediaProvider, PageResult } from "@/types/provider";
+
+// ─── Point d'entrée principal ────────────────────────────────────────────────
+
+/**
+ * Auto-détecte si l'URL est un profil ou une vidéo et route en conséquence.
+ */
+export async function fetchTikTokMedia(rawUrl: string): Promise<UnifiedProfile> {
+  const url = rawUrl.trim();
+  const kind = getTikTokUrlKind(url);
+
+  // URLs courtes/mobiles → résoudre d'abord pour connaître le vrai type
+  if (kind === "short" || kind === "share" || kind === "mobile") {
+    const resolved = await resolveTikTokUrl(url);
+    const resolvedKind = getTikTokUrlKind(resolved);
+
+    if (resolvedKind === "profile") return fetchTikTokProfileByUrl(resolved);
+    return fetchTikTokSingleVideo(resolved);
+  }
+
+  if (kind === "profile") return fetchTikTokProfileByUrl(url);
+  if (kind === "video") return fetchTikTokSingleVideo(url);
+
+  // "unknown" → essayer le mode profil en premier, puis vidéo
+  const username = extractTikTokUsername(url);
+  if (username) return fetchTikTokProfileByUsername(username);
+
+  return fetchTikTokSingleVideo(url);
+}
+
+// ─── Flux profil ─────────────────────────────────────────────────────────────
+
+/**
+ * Extrait le username depuis l'URL de profil et délègue.
+ */
+async function fetchTikTokProfileByUrl(profileUrl: string): Promise<UnifiedProfile> {
+  const username = extractTikTokUsername(profileUrl);
+  if (!username) {
+    throw new Error(`Impossible d'extraire le username TikTok depuis : ${profileUrl}`);
+  }
+  return fetchTikTokProfileByUsername(username);
+}
+
+/**
+ * Récupère le profil complet d'un utilisateur TikTok par son username.
+ * Appelle user/info + user/posts en parallèle.
+ *
+ * @param username  Le handle TikTok (sans @)
+ * @param cursor    Curseur de pagination (0 = première page)
+ */
+export async function fetchTikTokProfileByUsername(
+  username: string,
+  cursor = 0
+): Promise<UnifiedProfile> {
+  const errors: string[] = [];
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // STRATÉGIE A : HTML scraping (user info) + API mobile TikTok (vidéos)
+  // ─────────────────────────────────────────────────────────────────────────
+  // Étape 1 : toujours récupérer l'info utilisateur depuis la page TikTok
+  // Étape 2 : récupérer les vidéos via l'API mobile TikTok (aweme/v1/aweme/post/)
+  //           Elle utilise l'user_id du profil, pas tikwm.com.
+  // ─────────────────────────────────────────────────────────────────────────
+  if (cursor === 0) {
+    try {
+      const htmlUser = await fetchTikTokProfileFromHtml(username);
+
+      // Construire l'objet utilisateur unifié
+      const user: UnifiedUser = {
+        id: htmlUser.id,
+        platform: "tiktok",
+        username: htmlUser.uniqueId,
+        display_name: htmlUser.nickname,
+        biography: htmlUser.signature || undefined,
+        avatar_url: htmlUser.avatarLarger || undefined,
+        follower_count: htmlUser.followerCount,
+        following_count: htmlUser.followingCount,
+        profile_url: `https://www.tiktok.com/@${htmlUser.uniqueId}`,
+        is_private: htmlUser.privateAccount,
+        is_verified: htmlUser.verified,
+      };
+
+      // Étape 2 : récupérer les vidéos via API mobile TikTok
+      // On passe les cookies TikTok obtenus lors du scraping HTML (réduit le rate-limit)
+      if (htmlUser.id) {
+        try {
+          const awemeRes = await fetchTikTokVideosByUserId(htmlUser.id, 0, 20, htmlUser.cookies);
+          const media = (awemeRes.aweme_list ?? []).map(parseTikTokAwemeItem);
+          const hasMore = awemeRes.has_more === 1;
+          // Le cursor de pagination = max_cursor (timestamp de la vidéo la plus ancienne)
+          const nextCursor = awemeRes.max_cursor ?? 0;
+
+          return {
+            platform: "tiktok",
+            user,
+            media,
+            has_next_page: hasMore,
+            end_cursor: hasMore ? String(nextCursor) : undefined,
+            total_count: htmlUser.videoCount || media.length,
+          };
+        } catch (e) {
+          errors.push(`[tiktok-mobile-api] ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+
+      // Si l'API mobile a échoué → retourner le profil sans vidéos (avec marqueur)
+      return {
+        platform: "tiktok",
+        user,
+        media: [],
+        has_next_page: false,
+        end_cursor: undefined,
+        total_count: htmlUser.videoCount,
+        api_unavailable: true,
+      };
+    } catch (e) {
+      errors.push(`[tiktok-html] ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // STRATÉGIE B : tikwm.com API (fallback si HTML scraping échoue, ou pagination)
+  // Aussi utilisé pour la pagination (cursor > 0) et les cas où le HTML échoue.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Pagination via API mobile (cursor > 0)
+  if (cursor > 0) {
+    try {
+      const snap = await fetchTikTokVideosByUserId("", cursor); // userId vide → rechercherons
+      // Note: pour la pagination on a besoin du userId depuis quelque part
+      // Voir fetchTikTokNextPage() qui est appelé à la place pour la pagination
+      void snap;
+    } catch {
+      // Expected — on tombera sur tikwm ou un autre fallback
+    }
+  }
+
+  try {
+    // Appels en parallèle pour réduire la latence
+    const [userInfoRes, postsRes] = await Promise.all([
+      fetchTikTokUserInfo(username),
+      fetchTikTokUserPosts(username, 35, cursor),
+    ]);
+
+    const nextCursor = Number(postsRes.data.cursor ?? 0);
+    const hasMore = postsRes.data.has_more === 1;
+    const posts = postsRes.data.aweme_list ?? postsRes.data.videos ?? [];
+
+    if (posts.length === 0 && cursor === 0) {
+      const emptyProfile = parseTikWmProfileToUnified(
+        userInfoRes.data.user, [], 0, false
+      );
+      return emptyProfile;
+    }
+
+    return parseTikWmProfileToUnified(
+      userInfoRes.data.user,
+      posts,
+      nextCursor,
+      hasMore
+    );
+  } catch (e) {
+    errors.push(`[tikwm-profile] ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  try {
+    const postsRes = await fetchTikTokUserPosts(username, 35, cursor);
+    const nextCursor = Number(postsRes.data.cursor ?? 0);
+    const hasMore = postsRes.data.has_more === 1;
+    const posts = postsRes.data.aweme_list ?? postsRes.data.videos ?? [];
+
+    if (posts.length === 0) throw new Error("Aucune vidéo trouvée via user/posts");
+
+    const firstPost = posts[0];
+    const author = firstPost.author;
+    const media: UnifiedMedia[] = posts.map(parseTikWmPostItem);
+
+    return {
+      platform: "tiktok",
+      user: {
+        id: author?.id || username,
+        platform: "tiktok",
+        username: author?.unique_id || username,
+        display_name: author?.nickname || username,
+        avatar_url: author?.avatar,
+        follower_count: author?.follower_count,
+        following_count: author?.following_count,
+        profile_url: `https://www.tiktok.com/@${author?.unique_id || username}`,
+        is_private: false,
+        is_verified: false,
+      },
+      media,
+      has_next_page: hasMore,
+      end_cursor: hasMore ? String(nextCursor) : undefined,
+      total_count: media.length,
+    };
+  } catch (e) {
+    errors.push(`[tikwm-posts-only] ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  throw new Error(
+    `Impossible de récupérer le profil TikTok @${username}. Détails : ${errors.join(" | ")}`
+  );
+}
+
+// Type helper local
+interface UnifiedUser {
+  id: string;
+  platform: "tiktok";
+  username: string;
+  display_name: string;
+  biography?: string;
+  avatar_url?: string;
+  follower_count?: number;
+  following_count?: number;
+  profile_url: string;
+  is_private?: boolean;
+  is_verified?: boolean;
+}
+
+// ─── Pagination profil TikTok ────────────────────────────────────────────────
+
+/**
+ * Charge la page suivante des vidéos d'un profil TikTok.
+ * Retourne uniquement les nouveaux médias + pagination info (pas le profil entier).
+ */
+export async function fetchTikTokNextPage(
+  username: string,
+  cursor: number
+): Promise<PageResult> {
+  const postsRes = await fetchTikTokUserPosts(username, 35, cursor);
+
+  const nextCursor = Number(postsRes.data.cursor ?? 0);
+  const hasMore = postsRes.data.has_more === 1;
+  const posts = postsRes.data.aweme_list ?? postsRes.data.videos ?? [];
+
+  return {
+    platform: "tiktok",
+    media: posts.map(parseTikWmPostItem),
+    has_next_page: hasMore,
+    end_cursor: hasMore ? String(nextCursor) : undefined,
+  };
+}
+
+// ─── Flux vidéo unique ───────────────────────────────────────────────────────
+
+/**
+ * Récupère les données d'une vidéo TikTok spécifique via 3 stratégies.
+ */
+async function fetchTikTokSingleVideo(url: string): Promise<UnifiedProfile> {
+  const errors: string[] = [];
+
+  try {
+    const res = await fetchViaTikWm(url);
+    return parseTikWmToProfile(res.data);
+  } catch (e) {
+    errors.push(`[tikwm-video] ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  try {
+    const oembed = await fetchViaOEmbed(url);
+    return parseOEmbedToProfile(oembed, url);
+  } catch (e) {
+    errors.push(`[oEmbed] ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  try {
+    const htmlData = await fetchViaHtmlParsing(url);
+    return parseHtmlDataToProfile(htmlData, url);
+  } catch (e) {
+    errors.push(`[HTML] ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  throw new Error(
+    `Impossible de récupérer la vidéo TikTok. Détails : ${errors.join(" | ")}`
+  );
+}
+
+// ─── MediaProvider interface ──────────────────────────────────────────────────
+
+export const TikTokProvider: MediaProvider = {
+  platform: "tiktok",
+  detect: (input) => /tiktok\.com/i.test(input) || /vm\.tiktok\.com/i.test(input),
+  fetchProfile: fetchTikTokMedia,
+};

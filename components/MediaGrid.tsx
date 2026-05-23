@@ -2,18 +2,19 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Grid3X3, List, Filter, ChevronDown, Loader2 } from "lucide-react";
-import type { InstagramMedia, FilterType } from "@/types/instagram";
-import type { DownloadItem } from "@/types/instagram";
+import type { UnifiedMedia, UnifiedDownloadItem } from "@/types/media";
+type FilterType = "all" | "image" | "video" | "carousel" | "reel";
 import { MediaCard } from "./MediaCard";
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { Button } from "./ui/Button";
 import { cn } from "@/lib/utils";
 
 interface MediaGridProps {
-  media: InstagramMedia[];
+  media: UnifiedMedia[];
   selected: Set<string>;
-  downloads: Map<string, DownloadItem>;
+  downloads: Map<string, UnifiedDownloadItem>;
   onSelect: (id: string) => void;
-  onDownload: (media: InstagramMedia) => void;
+  onDownload: (media: UnifiedMedia) => void;
   onSelectAll: () => void;
   onClearSelected: () => void;
   // pagination
@@ -63,7 +64,7 @@ export function MediaGrid({
     return acc;
   }, [media]);
 
-  const findDownload = (mediaId: string) =>
+  const findDownload = (mediaId: string): UnifiedDownloadItem | undefined =>
     Array.from(downloads.values()).find((item) => item.mediaId === mediaId);
 
   // Auto-load on scroll

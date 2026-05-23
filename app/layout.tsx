@@ -2,13 +2,24 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "InstaGrab — Téléchargeur Instagram",
+  title: "Lia Downloader — Instagram & TikTok Downloader",
   description:
-    "Téléchargez photos, vidéos, reels et carrousels Instagram en quelques clics. Sans connexion requise.",
-  keywords: ["instagram", "download", "télécharger", "reels", "photos"],
+    "Téléchargez des photos, vidéos, reels et carrousels Instagram ainsi que des vidéos et slideshows TikTok. Sans connexion requise.",
+  keywords: [
+    "instagram downloader",
+    "tiktok downloader",
+    "télécharger instagram",
+    "télécharger tiktok",
+    "reels",
+    "vidéos",
+    "photos",
+    "carrousels",
+    "slideshow",
+  ],
   openGraph: {
-    title: "InstaGrab — Téléchargeur Instagram",
-    description: "Téléchargez tous les médias Instagram publics instantanément.",
+    title: "Lia Downloader — Instagram & TikTok Downloader",
+    description:
+      "Téléchargez des médias publics Instagram et TikTok en quelques clics.",
     type: "website",
   },
 };

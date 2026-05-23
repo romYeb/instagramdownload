@@ -8,7 +8,6 @@ import {
   AlertCircle,
   Archive,
 } from "lucide-react";
-import type { InstagramMedia } from "@/types/instagram";
 import { Button } from "./ui/Button";
 
 interface ZipState {

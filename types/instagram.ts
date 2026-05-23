@@ -62,6 +62,8 @@ export interface DownloadItem {
 
 export interface DownloadHistory {
   id: string;
+  /** Plateforme source — optionnel pour rétrocompatiblité Supabase */
+  platform?: "instagram" | "tiktok";
   username: string;
   full_name?: string;
   profile_pic_url?: string;

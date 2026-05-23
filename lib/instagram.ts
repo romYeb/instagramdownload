@@ -12,6 +12,12 @@ function randomUA() {
 }
 
 function makeHeaders(): Record<string, string> {
+  const sessionId = process.env.INSTAGRAM_SESSION_ID;
+  const csrfToken = process.env.INSTAGRAM_CSRF_TOKEN ?? "missing";
+
+  const cookieParts = [`csrftoken=${csrfToken}`];
+  if (sessionId) cookieParts.push(`sessionid=${sessionId}`);
+
   return {
     "User-Agent": randomUA(),
     Accept: "*/*",
@@ -22,9 +28,11 @@ function makeHeaders(): Record<string, string> {
     "X-IG-App-ID": "936619743392459",
     "X-ASBD-ID": "198387",
     "X-IG-WWW-Claim": "0",
+    "X-CSRFToken": csrfToken,
     "Sec-Fetch-Dest": "empty",
     "Sec-Fetch-Mode": "cors",
     "Sec-Fetch-Site": "same-origin",
+    Cookie: cookieParts.join("; "),
   };
 }
 

@@ -213,12 +213,20 @@ function parseApifyItem(item: ApifyTikTokItem): UnifiedMedia {
     }));
   }
 
-  // URL vidéo (sans watermark en priorité)
+  // URL vidéo :
+  //  • videoUrlNoWatermark / videoUrl → URLs CDN directes (expirent en ~6h)
+  //    Retournées par Apify uniquement si shouldDownloadVideos: true.
+  //  • webVideoUrl → page TikTok stable (ex: tiktok.com/@user/video/ID)
+  //    Le proxy /api/proxy la résout via tikwm.com → CDN H.264 permanent.
+  // Avec shouldDownloadVideos: false (notre config), seul webVideoUrl est rempli.
+  // On préfère quand même les CDN si présents (plus rapides à servir).
   const videoUrl =
     item.videoUrlNoWatermark ||
     item.videoUrl ||
     item.webVideoUrl ||
-    "";
+    (item.authorMeta?.name
+      ? `https://www.tiktok.com/@${item.authorMeta.name}/video/${item.id}`
+      : "");
 
   const cover = item.videoMeta?.originalCoverUrl || item.videoMeta?.coverUrl;
 

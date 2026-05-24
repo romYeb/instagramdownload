@@ -14,7 +14,7 @@ import {
   triggerBrowserDownload,
   buildProxyUrl,
 } from "@/lib/download";
-import { getUnifiedFilename } from "@/lib/utils/platform";
+import { generateMediaFilename } from "@/lib/utils/filename";
 import { v4 as uuidv4 } from "uuid";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -54,12 +54,16 @@ export function useDownload(username: string, platform: PlatformType = "instagra
           ? (media.video_url ?? media.url)
           : media.url;
 
+      // Nom de fichier avec la vraie caption du post
+      const filename = generateMediaFilename(media, platform, username);
+
       const item: UnifiedDownloadItem = {
         id: uuidv4(),
         mediaId: media.id,
         platform,
-        url: buildProxyUrl(rawUrl),
-        filename: getUnifiedFilename(platform, username, media.id, media.type),
+        // Passer le nom au proxy pour le Content-Disposition
+        url: buildProxyUrl(rawUrl, filename),
+        filename,
         type: media.type,
         status: "downloading",
         progress: 0,

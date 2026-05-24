@@ -9,6 +9,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { encodeContentDisposition } from "@/lib/utils/filename";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -76,7 +77,8 @@ function isAllowedUrl(url: string): { allowed: boolean; isTikTok: boolean } {
 // ─── Handler ─────────────────────────────────────────────────────────────────
 
 export async function GET(request: NextRequest) {
-  const rawUrl = request.nextUrl.searchParams.get("url");
+  const rawUrl  = request.nextUrl.searchParams.get("url");
+  const rawName = request.nextUrl.searchParams.get("filename");
 
   if (!rawUrl) {
     return NextResponse.json({ error: "url parameter required" }, { status: 400 });
@@ -135,6 +137,13 @@ export async function GET(request: NextRequest) {
       };
 
       if (contentLength) headers["Content-Length"] = contentLength;
+
+      // Content-Disposition avec nom de fichier UTF-8 (RFC 5987)
+      // Supporte accents et caractères français sur tous les OS/navigateurs
+      if (rawName) {
+        const cleanName = decodeURIComponent(rawName);
+        headers["Content-Disposition"] = encodeContentDisposition(cleanName);
+      }
 
       return new NextResponse(data, { status: 200, headers });
     } catch (error) {

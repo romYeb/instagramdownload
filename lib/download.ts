@@ -7,15 +7,21 @@
 
 import JSZip from "jszip";
 import type { UnifiedMedia, UnifiedDownloadItem, PlatformType } from "@/types/media";
-import { getUnifiedFilename, getZipFilename } from "@/lib/utils/platform";
+import {
+  generateMediaFilename,
+  generateCarouselFilename,
+  generateZipFilename,
+} from "@/lib/utils/filename";
 
 // ─── Proxy URL ────────────────────────────────────────────────────────────────
 
 /**
  * Construit l'URL proxy pour contourner les restrictions CORS des CDN.
+ * Le paramètre `filename` optionnel est transmis pour le header Content-Disposition.
  */
-export function buildProxyUrl(mediaUrl: string): string {
-  return `/api/proxy?url=${encodeURIComponent(mediaUrl)}`;
+export function buildProxyUrl(mediaUrl: string, filename?: string): string {
+  const base = `/api/proxy?url=${encodeURIComponent(mediaUrl)}`;
+  return filename ? `${base}&filename=${encodeURIComponent(filename)}` : base;
 }
 
 // ─── Téléchargement unitaire (streaming avec progression) ────────────────────
@@ -101,30 +107,29 @@ export async function downloadAsZip(
 
     try {
       if (item.type === "carousel" && item.children?.length) {
-        // Carrousel : chaque slide dans un fichier séparé
+        // Carrousel / slideshow : chaque slide nommée avec caption + numéro
         for (let j = 0; j < item.children.length; j++) {
           const child = item.children[j];
           const url = child.video_url ?? child.url;
           if (!url) continue;
 
-          const res = await fetch(buildProxyUrl(url));
+          const slideType = child.type === "video" ? "video" : "image";
+          const filename  = generateCarouselFilename(item, platform, username, j + 1, slideType);
+          const res = await fetch(buildProxyUrl(url, filename));
           if (!res.ok) continue;
 
-          const blob = await res.blob();
-          const filename = getUnifiedFilename(platform, username, item.id, child.type, j + 1);
-          folder.file(filename, blob);
+          folder.file(filename, await res.blob());
         }
       } else {
-        // Photo ou vidéo simple
+        // Photo, vidéo ou reel — nom basé sur la vraie caption
         const url = item.video_url ?? item.url;
         if (!url) continue;
 
-        const res = await fetch(buildProxyUrl(url));
+        const filename = generateMediaFilename(item, platform, username);
+        const res = await fetch(buildProxyUrl(url, filename));
         if (!res.ok) continue;
 
-        const blob = await res.blob();
-        const filename = getUnifiedFilename(platform, username, item.id, item.type);
-        folder.file(filename, blob);
+        folder.file(filename, await res.blob());
       }
     } catch {
       // On saute les médias qui échouent
@@ -133,5 +138,5 @@ export async function downloadAsZip(
 
   onProgress(media.length, media.length, "generating");
   const zipBlob = await zip.generateAsync({ type: "blob" });
-  triggerBrowserDownload(zipBlob, getZipFilename(platform, username));
+  triggerBrowserDownload(zipBlob, generateZipFilename(platform, username));
 }

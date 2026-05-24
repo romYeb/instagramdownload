@@ -22,6 +22,11 @@
  */
 
 import {
+  fetchTikTokProfileViaApify,
+  fetchTikTokNextPageViaApify,
+  isApifyConfigured,
+} from "./apify";
+import {
   resolveTikTokUrl,
   fetchViaTikWm,
   fetchViaOEmbed,
@@ -117,6 +122,27 @@ export async function fetchTikTokProfileByUsername(
 ): Promise<UnifiedProfile> {
   const key = username.toLowerCase();
 
+  // ── Stratégie 0 : Apify (si configuré) — le plus fiable ─────────────────
+  // Apify utilise un vrai navigateur Chromium stealth + IPs résidentielles.
+  // Contourne complètement le blocage Akamai de TikTok.
+  if (isApifyConfigured()) {
+    const cacheKey = `apify:${key}:${cursor}`;
+    const cached   = _profileCache.get(cacheKey);
+    if (cached && Date.now() < cached.expiresAt) return cached.profile;
+
+    try {
+      // cursor = offset numérique pour Apify (pas un timestamp)
+      const offset  = cursor === 0 ? 0 : parseInt(String(cursor), 10) || 0;
+      const profile = await fetchTikTokProfileViaApify(username, offset);
+
+      _profileCache.set(cacheKey, { profile, expiresAt: Date.now() + TTL_OK });
+      return profile;
+    } catch (e) {
+      console.warn(`[apify] Failed for @${username}:`, e instanceof Error ? e.message : e);
+      // Apify a échoué → tomber sur les stratégies suivantes
+    }
+  }
+
   if (cursor === 0) {
     // Vérifier le cache
     const cached = _profileCache.get(key);
@@ -124,7 +150,7 @@ export async function fetchTikTokProfileByUsername(
       return cached.profile;
     }
 
-    // Fetch réel
+    // Fetch réel (stratégies HTML + API web/mobile)
     const profile = await _fetchTikTokProfileByUsername(username, 0);
 
     // Stocker en cache (TTL selon disponibilité des vidéos)
@@ -344,6 +370,15 @@ export async function fetchTikTokNextPage(
   username: string,
   cursor: number
 ): Promise<PageResult> {
+  // Apify en priorité si disponible
+  if (isApifyConfigured()) {
+    try {
+      return await fetchTikTokNextPageViaApify(username, cursor);
+    } catch (e) {
+      console.warn(`[apify-pagination] Failed for @${username} cursor=${cursor}:`, e instanceof Error ? e.message : e);
+    }
+  }
+
   const postsRes = await fetchTikTokUserPosts(username, 35, cursor);
 
   const nextCursor = Number(postsRes.data.cursor ?? 0);

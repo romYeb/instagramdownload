@@ -21,6 +21,7 @@ import {
 } from "@/lib/providers/tiktok/extract";
 import { fetchTikTokVideosByUserId, fetchTikTokWebVideos } from "@/lib/providers/tiktok/api";
 import { parseTikTokAwemeItem, parseTikTokWebItem } from "@/lib/providers/tiktok/parser";
+import { fetchTikTokNextPageViaApify, isApifyConfigured } from "@/lib/providers/tiktok/apify";
 import type { AppErrorCode } from "@/types/media";
 
 export const runtime = "nodejs";
@@ -45,16 +46,29 @@ export async function GET(request: NextRequest) {
   const userId   = sp.get("userId");
   const cursor   = sp.get("cursor");
 
-  // ── 1a. Pagination TikTok (API web via secUid, ou API mobile via userId) ────
+  // ── 1a. Pagination TikTok ───────────────────────────────────────────────────
   if (userId && cursor && platform === "tiktok") {
     const cursorNum = parseInt(cursor, 10) || 0;
-    const isSecUid = !/^\d+$/.test(userId); // secUid = alphanumérique, userId = numérique
+    const isSecUid  = !/^\d+$/.test(userId); // secUid = alphanumérique, userId = numérique
+
+    // Stratégie 0 : Apify via username stocké dans userId quand Apify est actif
+    // (userId contient le username TikTok quand Apify est configuré)
+    if (isApifyConfigured()) {
+      // Quand Apify est actif, userId = username TikTok, cursor = offset numérique
+      const apifyUsername = sp.get("username") ?? userId;
+      try {
+        const result = await fetchTikTokNextPageViaApify(apifyUsername, cursorNum);
+        return NextResponse.json(result);
+      } catch (e) {
+        return handleTikTokError(e);
+      }
+    }
 
     // Stratégie 1 : API web TikTok (secUid) — même appel que le navigateur
     if (isSecUid) {
       try {
         const webRes = await fetchTikTokWebVideos(userId, cursorNum);
-        const media = (webRes.itemList ?? []).map(parseTikTokWebItem);
+        const media  = (webRes.itemList ?? []).map(parseTikTokWebItem);
         const hasMore = webRes.hasMore ?? false;
         return NextResponse.json({
           platform: "tiktok",
@@ -69,9 +83,9 @@ export async function GET(request: NextRequest) {
 
     // Stratégie 2 : API mobile (userId numérique) — fallback
     try {
-      const awemeRes = await fetchTikTokVideosByUserId(userId, cursorNum);
-      const media = awemeRes.aweme_list.map(parseTikTokAwemeItem);
-      const hasMore = awemeRes.has_more === 1;
+      const awemeRes   = await fetchTikTokVideosByUserId(userId, cursorNum);
+      const media      = awemeRes.aweme_list.map(parseTikTokAwemeItem);
+      const hasMore    = awemeRes.has_more === 1;
       const nextCursor = awemeRes.max_cursor ?? 0;
       return NextResponse.json({
         platform: "tiktok",

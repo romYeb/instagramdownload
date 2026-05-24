@@ -48,6 +48,18 @@ import {
 import type { UnifiedProfile, UnifiedMedia } from "@/types/media";
 import type { MediaProvider, PageResult } from "@/types/provider";
 
+// ─── Cache en mémoire — évite de re-frapper l'API TikTok sur la même instance ──
+// Fluid Compute (Vercel) réutilise les instances → ce cache est très efficace.
+// TTL : 30 min pour les profils avec vidéos, 2 min pour les profils sans vidéos.
+
+interface CacheEntry {
+  profile: UnifiedProfile;
+  expiresAt: number;
+}
+const _profileCache = new Map<string, CacheEntry>();
+const TTL_OK  = 30 * 60 * 1000; // 30 min (profil avec vidéos)
+const TTL_ERR =  2 * 60 * 1000; //  2 min (api_unavailable → réessai rapide)
+
 // ─── Point d'entrée principal ────────────────────────────────────────────────
 
 /**
@@ -91,12 +103,43 @@ async function fetchTikTokProfileByUrl(profileUrl: string): Promise<UnifiedProfi
 
 /**
  * Récupère le profil complet d'un utilisateur TikTok par son username.
- * Appelle user/info + user/posts en parallèle.
+ * - Première page (cursor=0) : cache en mémoire (TTL 30 min avec vidéos, 2 min sans).
+ * - Pagination (cursor>0)    : toujours fraîche, pas de cache.
  *
  * @param username  Le handle TikTok (sans @)
  * @param cursor    Curseur de pagination (0 = première page)
  */
 export async function fetchTikTokProfileByUsername(
+  username: string,
+  cursor = 0
+): Promise<UnifiedProfile> {
+  const key = username.toLowerCase();
+
+  if (cursor === 0) {
+    // Vérifier le cache
+    const cached = _profileCache.get(key);
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.profile;
+    }
+
+    // Fetch réel
+    const profile = await _fetchTikTokProfileByUsername(username, 0);
+
+    // Stocker en cache (TTL selon disponibilité des vidéos)
+    const ttl = profile.api_unavailable ? TTL_ERR : TTL_OK;
+    _profileCache.set(key, { profile, expiresAt: Date.now() + ttl });
+
+    return profile;
+  }
+
+  return _fetchTikTokProfileByUsername(username, cursor);
+}
+
+/**
+ * Implémentation réelle (toutes les stratégies de fetch).
+ * Ne pas appeler directement — passer par fetchTikTokProfileByUsername().
+ */
+async function _fetchTikTokProfileByUsername(
   username: string,
   cursor = 0
 ): Promise<UnifiedProfile> {

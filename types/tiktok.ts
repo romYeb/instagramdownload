@@ -187,6 +187,56 @@ export interface TikTokAwemePostResponse {
   aweme_list: TikTokAwemeItem[];
 }
 
+// ─── TikTok Web API (tiktok.com/api/post/item_list/) ─────────────────────────
+// Même format que le navigateur utilise pour charger un profil.
+
+export interface TikTokWebVideo {
+  id?: string;
+  height?: number;
+  width?: number;
+  duration?: number;
+  cover?: string;
+  originCover?: string;
+  dynamicCover?: string;
+  playAddr?: string;
+  downloadAddr?: string;
+}
+
+export interface TikTokWebItem {
+  id: string;
+  desc?: string;
+  createTime?: number;
+  video: TikTokWebVideo;
+  author?: {
+    id?: string;
+    secUid?: string;
+    uniqueId?: string;
+    nickname?: string;
+    avatarThumb?: string;
+  };
+  stats?: {
+    diggCount?: number;
+    commentCount?: number;
+    shareCount?: number;
+    playCount?: number;
+  };
+  music?: {
+    title?: string;
+    authorName?: string;
+  };
+  imagePost?: {
+    images?: Array<{ imageURL?: { urlList?: string[] } }>;
+  };
+}
+
+export interface TikTokWebPostResponse {
+  itemList?: TikTokWebItem[];
+  hasMore?: boolean;
+  cursor?: number;      // curseur de la prochaine page
+  statusCode?: number;
+  status_code?: number;
+}
+
 // ─── Types internes ───────────────────────────────────────────────────────────
 
 export type TikTokUrlKind =

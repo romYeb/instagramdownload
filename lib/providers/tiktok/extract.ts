@@ -30,6 +30,7 @@ import {
   fetchTikTokUserPosts,
   fetchTikTokProfileFromHtml,
   fetchTikTokVideosByUserId,
+  fetchTikTokWebVideos,
 } from "./api";
 import {
   parseTikWmToProfile,
@@ -38,6 +39,7 @@ import {
   parseTikWmProfileToUnified,
   parseTikWmPostItem,
   parseTikTokAwemeItem,
+  parseTikTokWebItem,
 } from "./parser";
 import {
   isTikTokProfileUrl,
@@ -157,8 +159,9 @@ async function _fetchTikTokProfileByUsername(
       const htmlUser = await fetchTikTokProfileFromHtml(username);
 
       // Construire l'objet utilisateur unifié
+      // user.id = secUid (utilisé pour la pagination via l'API web)
       const user: UnifiedUser = {
-        id: htmlUser.id,
+        id: htmlUser.secUid || htmlUser.id,
         platform: "tiktok",
         username: htmlUser.uniqueId,
         display_name: htmlUser.nickname,
@@ -171,14 +174,36 @@ async function _fetchTikTokProfileByUsername(
         is_verified: htmlUser.verified,
       };
 
-      // Étape 2 : récupérer les vidéos via API mobile TikTok
-      // On passe les cookies TikTok obtenus lors du scraping HTML (réduit le rate-limit)
+      // Étape 2a : API web TikTok (tiktok.com/api/post/item_list/)
+      // Même requête que le navigateur — utilise les cookies du scraping HTML.
+      if (htmlUser.secUid) {
+        try {
+          const webRes = await fetchTikTokWebVideos(htmlUser.secUid, 0, 35, htmlUser.cookies);
+          const itemList = webRes.itemList ?? [];
+          if (itemList.length === 0) throw new Error("itemList vide depuis l'API web");
+          const media = itemList.map(parseTikTokWebItem);
+          const hasMore = webRes.hasMore ?? false;
+          const nextCursor = webRes.cursor ?? 0;
+
+          return {
+            platform: "tiktok",
+            user,
+            media,
+            has_next_page: hasMore,
+            end_cursor: hasMore ? String(nextCursor) : undefined,
+            total_count: htmlUser.videoCount || media.length,
+          };
+        } catch (e) {
+          errors.push(`[tiktok-web-api] ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+
+      // Étape 2b : fallback API mobile TikTok (tiktokv.com)
       if (htmlUser.id) {
         try {
           const awemeRes = await fetchTikTokVideosByUserId(htmlUser.id, 0, 20, htmlUser.cookies);
           const media = (awemeRes.aweme_list ?? []).map(parseTikTokAwemeItem);
           const hasMore = awemeRes.has_more === 1;
-          // Le cursor de pagination = max_cursor (timestamp de la vidéo la plus ancienne)
           const nextCursor = awemeRes.max_cursor ?? 0;
 
           return {

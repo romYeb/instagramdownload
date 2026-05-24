@@ -11,6 +11,7 @@ import type {
   TikWmUserFull,
   TikTokOEmbedResponse,
   TikTokAwemeItem,
+  TikTokWebItem,
 } from "@/types/tiktok";
 import type {
   UnifiedProfile,
@@ -215,6 +216,57 @@ export function parseTikTokAwemeItem(item: TikTokAwemeItem): UnifiedMedia {
       video.width && video.height
         ? { width: video.width, height: video.height }
         : undefined,
+  };
+}
+
+// ─── Parser format web TikTok (tiktok.com/api/post/item_list/) ───────────────
+
+/**
+ * Convertit un item de l'API web TikTok en UnifiedMedia.
+ * Format identique à ce que le navigateur reçoit quand il charge un profil.
+ */
+export function parseTikTokWebItem(item: TikTokWebItem): UnifiedMedia {
+  const isSlideshow =
+    item.imagePost != null &&
+    Array.isArray(item.imagePost.images) &&
+    (item.imagePost.images.length ?? 0) > 0;
+  const mediaType: UnifiedMediaType = isSlideshow ? "carousel" : "video";
+
+  let children: UnifiedMediaChild[] | undefined;
+  if (isSlideshow && item.imagePost?.images) {
+    children = item.imagePost.images.map((img, i) => ({
+      id: `${item.id}_slide_${i}`,
+      type: "image" as const,
+      url: img.imageURL?.urlList?.[0] ?? "",
+      thumbnail_url: img.imageURL?.urlList?.[0] ?? "",
+    }));
+  }
+
+  const videoUrl = item.video?.playAddr || item.video?.downloadAddr || "";
+
+  return {
+    id: item.id,
+    platform: "tiktok",
+    type: mediaType,
+    url: isSlideshow ? (children?.[0]?.url ?? item.video?.cover ?? "") : videoUrl,
+    thumbnail_url: item.video?.originCover || item.video?.cover || undefined,
+    video_url: isSlideshow ? undefined : videoUrl || undefined,
+    caption: item.desc || undefined,
+    author: item.author?.nickname,
+    music: item.music?.title
+      ? `${item.music.title}${item.music.authorName ? ` — ${item.music.authorName}` : ""}`.trim()
+      : undefined,
+    like_count: item.stats?.diggCount,
+    comment_count: item.stats?.commentCount,
+    share_count: item.stats?.shareCount,
+    view_count: item.stats?.playCount,
+    timestamp: item.createTime,
+    duration: item.video?.duration,
+    dimensions:
+      item.video?.width && item.video?.height
+        ? { width: item.video.width, height: item.video.height }
+        : undefined,
+    children,
   };
 }
 

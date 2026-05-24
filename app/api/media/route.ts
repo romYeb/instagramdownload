@@ -19,8 +19,8 @@ import {
   fetchTikTokProfileByUsername,
   fetchTikTokNextPage,
 } from "@/lib/providers/tiktok/extract";
-import { fetchTikTokVideosByUserId } from "@/lib/providers/tiktok/api";
-import { parseTikTokAwemeItem } from "@/lib/providers/tiktok/parser";
+import { fetchTikTokVideosByUserId, fetchTikTokWebVideos } from "@/lib/providers/tiktok/api";
+import { parseTikTokAwemeItem, parseTikTokWebItem } from "@/lib/providers/tiktok/parser";
 import type { AppErrorCode } from "@/types/media";
 
 export const runtime = "nodejs";
@@ -45,10 +45,29 @@ export async function GET(request: NextRequest) {
   const userId   = sp.get("userId");
   const cursor   = sp.get("cursor");
 
-  // ── 1a. Pagination TikTok par userId (API mobile, sans tikwm.com) ────────────
+  // ── 1a. Pagination TikTok (API web via secUid, ou API mobile via userId) ────
   if (userId && cursor && platform === "tiktok") {
-    if (!/^\d+$/.test(userId)) return err("userId TikTok invalide", "INVALID_URL", 400);
     const cursorNum = parseInt(cursor, 10) || 0;
+    const isSecUid = !/^\d+$/.test(userId); // secUid = alphanumérique, userId = numérique
+
+    // Stratégie 1 : API web TikTok (secUid) — même appel que le navigateur
+    if (isSecUid) {
+      try {
+        const webRes = await fetchTikTokWebVideos(userId, cursorNum);
+        const media = (webRes.itemList ?? []).map(parseTikTokWebItem);
+        const hasMore = webRes.hasMore ?? false;
+        return NextResponse.json({
+          platform: "tiktok",
+          media,
+          has_next_page: hasMore,
+          end_cursor: hasMore ? String(webRes.cursor ?? 0) : undefined,
+        });
+      } catch (e) {
+        return handleTikTokError(e);
+      }
+    }
+
+    // Stratégie 2 : API mobile (userId numérique) — fallback
     try {
       const awemeRes = await fetchTikTokVideosByUserId(userId, cursorNum);
       const media = awemeRes.aweme_list.map(parseTikTokAwemeItem);

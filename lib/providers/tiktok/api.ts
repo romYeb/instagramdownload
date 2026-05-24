@@ -17,6 +17,7 @@ import type {
   TikWmPostsResponse,
   TikTokOEmbedResponse,
   TikTokAwemePostResponse,
+  TikTokWebPostResponse,
 } from "@/types/tiktok";
 
 const DEFAULT_UA =
@@ -324,6 +325,7 @@ export async function fetchTikTokVideosByUserId(
  */
 export interface TikTokProfileHtmlResult {
   id: string;
+  secUid: string;   // identifiant sécurisé — utilisé par l'API web pour la pagination
   uniqueId: string;
   nickname: string;
   signature: string;
@@ -334,7 +336,7 @@ export interface TikTokProfileHtmlResult {
   followingCount: number;
   heartCount: number;
   videoCount: number;
-  /** Cookies définis par TikTok lors du chargement de la page (pour l'API mobile) */
+  /** Cookies définis par TikTok lors du chargement de la page (pour l'API web/mobile) */
   cookies?: string;
 }
 
@@ -372,6 +374,7 @@ export async function fetchTikTokProfileFromHtml(
         userInfo?: {
           user?: {
             id?: string;
+            secUid?: string;
             uniqueId?: string;
             nickname?: string;
             signature?: string;
@@ -410,6 +413,7 @@ export async function fetchTikTokProfileFromHtml(
 
   return {
     id: user.id ?? "",
+    secUid: user.secUid ?? "",
     uniqueId: user.uniqueId,
     nickname: user.nickname ?? user.uniqueId,
     signature: user.signature ?? "",
@@ -422,6 +426,73 @@ export async function fetchTikTokProfileFromHtml(
     videoCount: stats?.videoCount ?? 0,
     cookies: cookieString || undefined,
   };
+}
+
+// ─── 6. API web TikTok — liste des vidéos via tiktok.com (même appel que le navigateur) ──
+
+/**
+ * Récupère la liste des vidéos d'un profil TikTok via l'API web interne de TikTok
+ * (tiktok.com/api/post/item_list/).
+ *
+ * ✅ Utilise le secUid extrait du HTML — même requête qu'un vrai navigateur.
+ * ✅ Les cookies issus du scraping HTML aident à contourner la détection bot.
+ * ✅ Ne dépend PAS de tikwm.com ni de l'API mobile tiktokv.com.
+ */
+export async function fetchTikTokWebVideos(
+  secUid: string,
+  cursor = 0,
+  count = 35,
+  sessionCookies?: string
+): Promise<TikTokWebPostResponse> {
+  if (!secUid) throw new Error("secUid requis pour l'API web TikTok");
+
+  const params = new URLSearchParams({
+    aid: "1988",
+    app_name: "tiktok_web",
+    device_platform: "web_pc",
+    region: "US",
+    priority_region: "US",
+    os: "windows",
+    secUid,
+    count: String(count),
+    cursor: String(cursor),
+    language: "en",
+    screen_width: "1920",
+    screen_height: "1080",
+    browser_language: "en-US",
+    browser_platform: "Win32",
+    browser_name: "Mozilla",
+  });
+
+  const headers: Record<string, string> = {
+    "User-Agent": UA,
+    Accept: "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    Referer: "https://www.tiktok.com/",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+    ...(sessionCookies ? { Cookie: sessionCookies } : {}),
+  };
+
+  const r = await fetch(
+    `https://www.tiktok.com/api/post/item_list/?${params.toString()}`,
+    { headers, signal: AbortSignal.timeout(15_000) }
+  );
+
+  if (!r.ok) throw new Error(`TikTok web API: HTTP ${r.status}`);
+
+  const text = await r.text();
+  if (!text || text.length < 10)
+    throw new Error("TikTok web API: réponse vide (rate-limit possible)");
+
+  const json = JSON.parse(text) as TikTokWebPostResponse;
+  const code = json.statusCode ?? json.status_code;
+  if (code !== undefined && code !== 0) {
+    throw new Error(`TikTok web API: statusCode=${code}`);
+  }
+
+  return json;
 }
 
 // ─── 5. Fallback : oEmbed ─────────────────────────────────────────────────────

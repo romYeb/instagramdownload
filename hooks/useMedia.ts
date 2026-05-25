@@ -26,6 +26,12 @@ export interface MediaSuccessState {
   isLoadingMore: boolean;
   /** true quand le profil est chargé mais les vidéos sont indisponibles (API down) */
   apiUnavailable?: boolean;
+  /**
+   * Erreur de pagination — la page suivante n'a pas pu être chargée.
+   * hasMore reste true → l'utilisateur peut retenter manuellement.
+   * Distinct de "plus de pages" pour ne pas masquer le bouton "Charger plus".
+   */
+  paginationError?: string;
 }
 
 export type MediaState =
@@ -121,6 +127,7 @@ export function useMedia() {
           totalCount: json.total_count ?? json.user?.media_count ?? (json.media?.length ?? 0),
           isLoadingMore: false,
           apiUnavailable: json.api_unavailable ?? false,
+          paginationError: undefined,
         });
       } catch {
         set({
@@ -187,14 +194,17 @@ export function useMedia() {
           hasMore: json.has_next_page ?? false,
           cursor: json.end_cursor,
           isLoadingMore: false,
+          paginationError: undefined, // effacer l'erreur précédente si ça a marché
         };
       });
-    } catch {
-      // En cas d'erreur pagination : hasMore → false pour stopper loadAll.
-      // L'utilisateur peut recharger la page pour réessayer.
+    } catch (err) {
+      // En cas d'erreur : on garde hasMore=true et le cursor intact
+      // → l'utilisateur peut retenter manuellement via le bouton "Charger plus".
+      // paginationError stop la boucle loadAll sans cacher le bouton.
+      const msg = err instanceof Error ? err.message : "Erreur de pagination";
       set((prev) =>
         prev.status === "success"
-          ? { ...prev, isLoadingMore: false, hasMore: false }
+          ? { ...prev, isLoadingMore: false, paginationError: msg }
           : prev
       );
     } finally {
@@ -212,10 +222,13 @@ export function useMedia() {
     while (true) {
       const s = stateRef.current;
       if (s.status !== "success" || !s.hasMore || !s.cursor) break;
+      // Stopper si une erreur de pagination est survenue — évite la boucle infinie.
+      // L'utilisateur peut retenter manuellement : le bouton "Charger plus" reste visible.
+      if ((s as MediaSuccessState).paginationError) break;
       if (pendingMore.current) { await wait(300); continue; }
       await loadMore();
-      // Petite pause entre les pages pour ne pas hammerer le serveur
-      await wait(600);
+      // Pause entre les pages pour ne pas déclencher le rate-limit Instagram/TikTok
+      await wait(800);
     }
   }, [loadMore]);
 

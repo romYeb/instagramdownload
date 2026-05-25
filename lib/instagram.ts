@@ -255,41 +255,74 @@ export interface PageResult {
   end_cursor?: string;
 }
 
-async function fetchNextPageViaGraphQL(userId: string, cursor: string): Promise<PageResult> {
-  const variables = JSON.stringify({ id: userId, first: 50, after: cursor });
-  const data = await igGet(
-    `https://www.instagram.com/graphql/query/?query_hash=8c2a529969ee035a5063f2fc8602a0fd&variables=${encodeURIComponent(variables)}`
-  );
+// ─── Helpers pagination ────────────────────────────────────────────────────────
 
-  // Instagram retourne parfois status_code 200 avec un body d'erreur (credentials expirés)
-  if (data?.message === "login_required" || data?.require_login) {
+function checkAuthError(data: unknown): void {
+  const d = data as Record<string, unknown>;
+  if (d?.message === "login_required" || d?.require_login || d?.login_required) {
     throw new Error("INSTAGRAM_AUTH_EXPIRED: session expirée — mettez à jour INSTAGRAM_SESSION_ID et INSTAGRAM_CSRF_TOKEN dans Vercel");
   }
+}
 
-  const timeline = data?.data?.user?.edge_owner_to_timeline_media;
-  if (!timeline) throw new Error(`No timeline data in response — body: ${JSON.stringify(data).slice(0, 200)}`);
+// Cursor GraphQL (base64 alphanumérique) vs max_id numérique Instagram
+function isGraphQLCursor(cursor: string): boolean {
+  // Les curseurs GraphQL sont des chaînes base64 qui encodent des identifiants opaques
+  // Les max_id sont des entiers (timestamp) : "1234567890123456789" ou "1234_528817151"
+  return !/^\d{10,}(_\d+)?$/.test(cursor);
+}
 
-  return {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    media: timeline.edges.map((e: any) => parseMediaNode(e.node)),
-    has_next_page: timeline.page_info.has_next_page ?? false,
-    end_cursor: timeline.page_info.end_cursor,
-  };
+async function fetchNextPageViaGraphQL(userId: string, cursor: string): Promise<PageResult> {
+  const variables = JSON.stringify({ id: userId, first: 12, after: cursor });
+
+  // Essayer plusieurs query_hash / doc_id connus (Instagram les change parfois)
+  const endpoints = [
+    `https://www.instagram.com/graphql/query/?query_hash=8c2a529969ee035a5063f2fc8602a0fd&variables=${encodeURIComponent(variables)}`,
+    `https://www.instagram.com/graphql/query/?doc_id=17888483320059182&variables=${encodeURIComponent(variables)}`,
+    `https://www.instagram.com/graphql/query/?query_hash=42323d64886122307be10013ad2dcc44&variables=${encodeURIComponent(variables)}`,
+  ];
+
+  const subErrors: string[] = [];
+  for (const url of endpoints) {
+    try {
+      const data = await igGet(url);
+      checkAuthError(data);
+
+      const timeline = data?.data?.user?.edge_owner_to_timeline_media;
+      if (!timeline) {
+        subErrors.push(`no timeline (body=${JSON.stringify(data).slice(0, 120)})`);
+        continue; // essayer le prochain endpoint
+      }
+
+      return {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        media: timeline.edges.map((e: any) => parseMediaNode(e.node)),
+        has_next_page: timeline.page_info.has_next_page ?? false,
+        end_cursor: timeline.page_info.end_cursor,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.startsWith("INSTAGRAM_AUTH_EXPIRED")) throw e;
+      subErrors.push(msg);
+    }
+  }
+  throw new Error(`GraphQL: ${subErrors.join(" | ")}`);
 }
 
 async function fetchNextPageViaUserFeed(userId: string, cursor: string): Promise<PageResult> {
-  // Le cursor GraphQL base64 ne fonctionne pas avec max_id.
-  // L'API feed/user attend un max_id au format numérique (timestamp ou pk).
-  // On tente quand même — si le cursor est numérique ça marchera.
+  // L'API feed/user attend un max_id numérique.
+  // Si le cursor est un cursor GraphQL base64, on l'utilise quand même — Instagram
+  // l'accepte parfois comme max_id (comportement non documenté).
   const data = await igGet(
-    `https://www.instagram.com/api/v1/feed/user/${userId}/?count=50&max_id=${encodeURIComponent(cursor)}`
+    `https://www.instagram.com/api/v1/feed/user/${userId}/?count=12&max_id=${encodeURIComponent(cursor)}`
   );
+  checkAuthError(data);
 
-  if (data?.message === "login_required" || data?.require_login) {
-    throw new Error("INSTAGRAM_AUTH_EXPIRED: session expirée — mettez à jour vos credentials Instagram dans Vercel");
-  }
   if (!Array.isArray(data?.items)) {
-    throw new Error(`No items array — body: ${JSON.stringify(data).slice(0, 200)}`);
+    throw new Error(`feed/user: no items — body: ${JSON.stringify(data).slice(0, 200)}`);
+  }
+  if (data.items.length === 0 && !data.more_available) {
+    // Probablement une réponse vide car max_id format incompatible
+    throw new Error(`feed/user: 0 items retournés (cursor format probablement incompatible)`);
   }
 
   return {
@@ -301,19 +334,18 @@ async function fetchNextPageViaUserFeed(userId: string, cursor: string): Promise
 }
 
 /**
- * Nouvelle approche via api/v1/feed/user/{userId}/username/ (plus stable)
- * Utilise le même cursor base64 que le GraphQL.
+ * Fallback : recharge la première page sans cursor, retourne le reste.
+ * Utilisé quand le cursor est incompatible avec les endpoints disponibles.
+ * Perd la position dans la liste (repart du début) mais évite le 503.
  */
-async function fetchNextPageViaFeedV2(userId: string, cursor: string): Promise<PageResult> {
+async function fetchNextPageFallback(userId: string): Promise<PageResult> {
   const data = await igGet(
-    `https://www.instagram.com/api/v1/feed/user/${userId}/?count=12&max_id=${encodeURIComponent(cursor)}&exclude_comment=true&only_fetch_first_carousel_media=false`
+    `https://www.instagram.com/api/v1/feed/user/${userId}/?count=12`
   );
+  checkAuthError(data);
 
-  if (data?.message === "login_required" || data?.require_login) {
-    throw new Error("INSTAGRAM_AUTH_EXPIRED: session expirée");
-  }
   if (!Array.isArray(data?.items)) {
-    throw new Error(`feedV2: no items — body: ${JSON.stringify(data).slice(0, 200)}`);
+    throw new Error(`fallback feed/user: no items`);
   }
 
   return {
@@ -326,24 +358,29 @@ async function fetchNextPageViaFeedV2(userId: string, cursor: string): Promise<P
 
 export async function fetchNextPage(userId: string, cursor: string): Promise<PageResult> {
   const errors: string[] = [];
+  const cursorIsGraphQL = isGraphQLCursor(cursor);
 
-  try { return await fetchNextPageViaGraphQL(userId, cursor); }
-  catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    errors.push(`GraphQL: ${msg}`);
-    // Remonter immédiatement si c'est une erreur d'auth — inutile d'essayer les autres
-    if (msg.startsWith("INSTAGRAM_AUTH_EXPIRED")) throw e;
+  // Stratégie 1 : GraphQL (même format que le cursor initial web_profile_info)
+  if (cursorIsGraphQL) {
+    try { return await fetchNextPageViaGraphQL(userId, cursor); }
+    catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      errors.push(`GraphQL: ${msg}`);
+      if (msg.startsWith("INSTAGRAM_AUTH_EXPIRED")) throw e;
+    }
   }
 
-  try { return await fetchNextPageViaFeedV2(userId, cursor); }
-  catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    errors.push(`FeedV2: ${msg}`);
-    if (msg.startsWith("INSTAGRAM_AUTH_EXPIRED")) throw e;
-  }
-
+  // Stratégie 2 : feed/user avec max_id (fonctionne si cursor est numérique)
   try { return await fetchNextPageViaUserFeed(userId, cursor); }
-  catch (e) { errors.push(`UserFeed: ${e instanceof Error ? e.message : e}`); }
+  catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    errors.push(`feed/user: ${msg}`);
+    if (msg.startsWith("INSTAGRAM_AUTH_EXPIRED")) throw e;
+  }
+
+  // Stratégie 3 : fallback sans cursor (repart du début) — garantit de ne pas rester bloqué
+  try { return await fetchNextPageFallback(userId); }
+  catch (e) { errors.push(`fallback: ${e instanceof Error ? e.message : e}`); }
 
   throw new Error(`Pagination Instagram échouée: ${errors.join(" | ")}`);
 }

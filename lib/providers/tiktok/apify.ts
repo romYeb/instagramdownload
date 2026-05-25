@@ -133,6 +133,15 @@ export async function fetchTikTokProfileViaApify(
   if (!r.ok) {
     const txt = await r.text().catch(() => "");
     console.error(`${tag} HTTP ${r.status} — ${txt.slice(0, 300)}`);
+
+    // Détection spécifique : quota mensuel Apify dépassé
+    if (r.status === 403 && txt.includes("hard limit exceeded")) {
+      throw new Error(
+        `APIFY_LIMIT_EXCEEDED: Le quota mensuel Apify est épuisé. ` +
+        `Rechargez vos crédits sur apify.com (compte → Billing) ou attendez le prochain cycle mensuel.`
+      );
+    }
+
     throw new Error(`Apify HTTP ${r.status}: ${txt.slice(0, 300)}`);
   }
 

@@ -229,6 +229,16 @@ function handleTikTokError(e: unknown): NextResponse {
   if (msg.toLowerCase().includes("not found") || msg.includes("404")) return err("Vidéo ou profil TikTok introuvable.", "MEDIA_NOT_FOUND", 404);
   if (msg.includes("429")) return err("TikTok limite les requêtes. Réessayez dans 30s.", "RATE_LIMIT", 429);
 
+  // Quota mensuel Apify épuisé
+  if (msg.startsWith("APIFY_LIMIT_EXCEEDED")) {
+    return err(
+      "Quota mensuel Apify épuisé. Connectez-vous sur apify.com → Billing pour recharger vos crédits. Sans Apify, les vidéos TikTok ne peuvent pas être récupérées depuis les serveurs Vercel (IPs bloquées par TikTok).",
+      "RATE_LIMIT",
+      503,
+      msg
+    );
+  }
+
   // Cas spécifique : tikwm.com bloqué par Cloudflare (502/503)
   if (msg.includes("502") || msg.includes("503") || msg.includes("522") || msg.includes("524")) {
     return err(

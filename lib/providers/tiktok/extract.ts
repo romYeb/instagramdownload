@@ -64,8 +64,10 @@ interface CacheEntry {
   expiresAt: number;
 }
 const _profileCache = new Map<string, CacheEntry>();
-const TTL_OK  = 30 * 60 * 1000; // 30 min (profil avec vidéos)
-const TTL_ERR =  2 * 60 * 1000; //  2 min (api_unavailable → réessai rapide)
+// TTL long : chaque call Apify coûte des crédits → on cache 4h pour en consommer le moins possible.
+// Fluid Compute réutilise les instances → ce cache est très efficace sur les instances chaudes.
+const TTL_OK  = 4 * 60 * 60 * 1000; // 4h (profil avec vidéos)
+const TTL_ERR = 5 * 60 * 1000;       // 5 min (api_unavailable → réessai si problème temporaire)
 
 // ─── Point d'entrée principal ────────────────────────────────────────────────
 
@@ -144,8 +146,15 @@ export async function fetchTikTokProfileByUsername(
       _profileCache.set(cacheKey, { profile, expiresAt: Date.now() + TTL_OK });
       return profile;
     } catch (e) {
-      console.warn(`${tag} [STRATEGY_0:APIFY] FAILED — ${e instanceof Error ? e.message : e} — falling through`);
-      // Apify a échoué → tomber sur les stratégies suivantes
+      const errMsg = e instanceof Error ? e.message : String(e);
+      console.warn(`${tag} [STRATEGY_0:APIFY] FAILED — ${errMsg}`);
+
+      // Quota mensuel Apify épuisé → remonter directement, ne pas essayer d'autres
+      // stratégies qui échoueront de toute façon (TikTok bloque les IPs Vercel).
+      if (errMsg.startsWith("APIFY_LIMIT_EXCEEDED")) {
+        throw e; // propagé jusqu'à handleTikTokError → message clair pour l'utilisateur
+      }
+      // Autre erreur Apify → tomber sur les stratégies suivantes
     }
   } else {
     console.log(`${tag} [STRATEGY_0:APIFY] SKIPPED — APIFY_API_TOKEN not set`);

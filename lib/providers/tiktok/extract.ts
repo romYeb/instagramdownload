@@ -121,6 +121,7 @@ export async function fetchTikTokProfileByUsername(
   cursor = 0
 ): Promise<UnifiedProfile> {
   const key = username.toLowerCase();
+  const tag = `[tiktok:${username}]`;
 
   // ── Stratégie 0 : Apify (si configuré) — le plus fiable ─────────────────
   // Apify utilise un vrai navigateur Chromium stealth + IPs résidentielles.
@@ -128,19 +129,26 @@ export async function fetchTikTokProfileByUsername(
   if (isApifyConfigured()) {
     const cacheKey = `apify:${key}:${cursor}`;
     const cached   = _profileCache.get(cacheKey);
-    if (cached && Date.now() < cached.expiresAt) return cached.profile;
+    if (cached && Date.now() < cached.expiresAt) {
+      console.log(`${tag} [STRATEGY_0:APIFY] cache hit — media=${cached.profile.media.length}`);
+      return cached.profile;
+    }
 
     try {
       // cursor = offset numérique pour Apify (pas un timestamp)
       const offset  = cursor === 0 ? 0 : parseInt(String(cursor), 10) || 0;
+      console.log(`${tag} [STRATEGY_0:APIFY] calling fetchTikTokProfileViaApify offset=${offset}`);
       const profile = await fetchTikTokProfileViaApify(username, offset);
+      console.log(`${tag} [STRATEGY_0:APIFY] SUCCESS — media=${profile.media.length} has_next=${profile.has_next_page} api_unavailable=${profile.api_unavailable ?? false}`);
 
       _profileCache.set(cacheKey, { profile, expiresAt: Date.now() + TTL_OK });
       return profile;
     } catch (e) {
-      console.warn(`[apify] Failed for @${username}:`, e instanceof Error ? e.message : e);
+      console.warn(`${tag} [STRATEGY_0:APIFY] FAILED — ${e instanceof Error ? e.message : e} — falling through`);
       // Apify a échoué → tomber sur les stratégies suivantes
     }
+  } else {
+    console.log(`${tag} [STRATEGY_0:APIFY] SKIPPED — APIFY_API_TOKEN not set`);
   }
 
   if (cursor === 0) {
@@ -172,20 +180,22 @@ async function _fetchTikTokProfileByUsername(
   cursor = 0
 ): Promise<UnifiedProfile> {
   const errors: string[] = [];
+  const tag = `[tiktok:${username}]`;
 
   // ─────────────────────────────────────────────────────────────────────────
   // STRATÉGIE A : HTML scraping (user info) + API mobile TikTok (vidéos)
   // ─────────────────────────────────────────────────────────────────────────
-  // Étape 1 : toujours récupérer l'info utilisateur depuis la page TikTok
-  // Étape 2 : récupérer les vidéos via l'API mobile TikTok (aweme/v1/aweme/post/)
-  //           Elle utilise l'user_id du profil, pas tikwm.com.
-  // ─────────────────────────────────────────────────────────────────────────
   if (cursor === 0) {
     try {
+      console.log(`${tag} [STRATEGY_A:HTML] scraping tiktok.com/@${username}`);
       const htmlUser = await fetchTikTokProfileFromHtml(username);
 
+      console.log(`${tag} [STRATEGY_A:HTML] OK — userId=${htmlUser.id || "(vide)"} secUid=${htmlUser.secUid ? htmlUser.secUid.slice(0,20)+"..." : "(vide)"} videoCount=${htmlUser.videoCount} followers=${htmlUser.followerCount} cookies=${!!htmlUser.cookies}`);
+
+      if (!htmlUser.id)    console.warn(`${tag} [STRATEGY_A:HTML] ⚠ userId VIDE — mobile API ne fonctionnera pas`);
+      if (!htmlUser.secUid) console.warn(`${tag} [STRATEGY_A:HTML] ⚠ secUid VIDE — web API ne fonctionnera pas`);
+
       // Construire l'objet utilisateur unifié
-      // user.id = secUid (utilisé pour la pagination via l'API web)
       const user: UnifiedUser = {
         id: htmlUser.secUid || htmlUser.id,
         platform: "tiktok",
@@ -201,13 +211,16 @@ async function _fetchTikTokProfileByUsername(
       };
 
       // Étape 2a : API web TikTok (tiktok.com/api/post/item_list/)
-      // Même requête que le navigateur — utilise les cookies du scraping HTML.
       if (htmlUser.secUid) {
         try {
+          console.log(`${tag} [STRATEGY_A:WEB_API] calling item_list secUid=${htmlUser.secUid.slice(0,20)}...`);
           const webRes = await fetchTikTokWebVideos(htmlUser.secUid, 0, 35, htmlUser.cookies);
           const itemList = webRes.itemList ?? [];
-          if (itemList.length === 0) throw new Error("itemList vide depuis l'API web");
+          const statusCode = webRes.statusCode ?? webRes.status_code;
+          console.log(`${tag} [STRATEGY_A:WEB_API] response — itemList=${itemList.length} statusCode=${statusCode} hasMore=${webRes.hasMore}`);
+          if (itemList.length === 0) throw new Error(`itemList vide (statusCode=${statusCode})`);
           const media = itemList.map(parseTikTokWebItem);
+          console.log(`${tag} [STRATEGY_A:WEB_API] SUCCESS — media=${media.length} après parseTikTokWebItem`);
           const hasMore = webRes.hasMore ?? false;
           const nextCursor = webRes.cursor ?? 0;
 
@@ -220,15 +233,24 @@ async function _fetchTikTokProfileByUsername(
             total_count: htmlUser.videoCount || media.length,
           };
         } catch (e) {
-          errors.push(`[tiktok-web-api] ${e instanceof Error ? e.message : String(e)}`);
+          const msg = e instanceof Error ? e.message : String(e);
+          errors.push(`[tiktok-web-api] ${msg}`);
+          console.warn(`${tag} [STRATEGY_A:WEB_API] FAILED — ${msg}`);
         }
+      } else {
+        console.warn(`${tag} [STRATEGY_A:WEB_API] SKIPPED — secUid vide`);
       }
 
       // Étape 2b : fallback API mobile TikTok (tiktokv.com)
       if (htmlUser.id) {
         try {
+          console.log(`${tag} [STRATEGY_A:MOBILE_API] calling aweme/post userId=${htmlUser.id}`);
           const awemeRes = await fetchTikTokVideosByUserId(htmlUser.id, 0, 20, htmlUser.cookies);
-          const media = (awemeRes.aweme_list ?? []).map(parseTikTokAwemeItem);
+          const awemeList = awemeRes.aweme_list ?? [];
+          console.log(`${tag} [STRATEGY_A:MOBILE_API] response — aweme_list=${awemeList.length} status_code=${awemeRes.status_code} has_more=${awemeRes.has_more}`);
+          if (awemeList.length === 0) throw new Error(`aweme_list vide (status_code=${awemeRes.status_code})`);
+          const media = awemeList.map(parseTikTokAwemeItem);
+          console.log(`${tag} [STRATEGY_A:MOBILE_API] SUCCESS — media=${media.length} après parseTikTokAwemeItem`);
           const hasMore = awemeRes.has_more === 1;
           const nextCursor = awemeRes.max_cursor ?? 0;
 
@@ -237,48 +259,36 @@ async function _fetchTikTokProfileByUsername(
             user,
             media,
             has_next_page: hasMore,
-            end_cursor: hasMore ? String(nextCursor) : undefined,
+            end_cursor: hasMore ? `${nextCursor}_${htmlUser.id}` : undefined,
             total_count: htmlUser.videoCount || media.length,
           };
         } catch (e) {
-          errors.push(`[tiktok-mobile-api] ${e instanceof Error ? e.message : String(e)}`);
+          const msg = e instanceof Error ? e.message : String(e);
+          errors.push(`[tiktok-mobile-api] ${msg}`);
+          console.warn(`${tag} [STRATEGY_A:MOBILE_API] FAILED — ${msg}`);
         }
+      } else {
+        console.warn(`${tag} [STRATEGY_A:MOBILE_API] SKIPPED — userId vide`);
       }
 
-      // Si l'API mobile a échoué → retourner le profil sans vidéos (avec marqueur)
-      return {
-        platform: "tiktok",
-        user,
-        media: [],
-        has_next_page: false,
-        end_cursor: undefined,
-        total_count: htmlUser.videoCount,
-        api_unavailable: true,
-      };
+      // Les deux APIs ont échoué — NE PAS retourner api_unavailable ici !
+      // On laisse passer vers Strategy B (tikwm.com) qui est indépendante.
+      console.warn(`${tag} [STRATEGY_A] toutes les APIs TikTok directes ont échoué — passage à Strategy B (tikwm.com)`);
+      errors.push(`[strategy-a-done] user_obtained_but_videos_failed`);
     } catch (e) {
-      errors.push(`[tiktok-html] ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      errors.push(`[tiktok-html] ${msg}`);
+      console.warn(`${tag} [STRATEGY_A:HTML] FAILED — ${msg}`);
     }
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // STRATÉGIE B : tikwm.com API (fallback si HTML scraping échoue, ou pagination)
-  // Aussi utilisé pour la pagination (cursor > 0) et les cas où le HTML échoue.
+  // STRATÉGIE B : tikwm.com API (fallback si Strategy A échoue)
   // ─────────────────────────────────────────────────────────────────────────
 
-  // Pagination via API mobile (cursor > 0)
-  if (cursor > 0) {
-    try {
-      const snap = await fetchTikTokVideosByUserId("", cursor); // userId vide → rechercherons
-      // Note: pour la pagination on a besoin du userId depuis quelque part
-      // Voir fetchTikTokNextPage() qui est appelé à la place pour la pagination
-      void snap;
-    } catch {
-      // Expected — on tombera sur tikwm ou un autre fallback
-    }
-  }
+  console.log(`${tag} [STRATEGY_B:TIKWM] calling user/info + user/posts in parallel`);
 
   try {
-    // Appels en parallèle pour réduire la latence
     const [userInfoRes, postsRes] = await Promise.all([
       fetchTikTokUserInfo(username),
       fetchTikTokUserPosts(username, 35, cursor),
@@ -288,22 +298,30 @@ async function _fetchTikTokProfileByUsername(
     const hasMore = postsRes.data.has_more === 1;
     const posts = postsRes.data.aweme_list ?? postsRes.data.videos ?? [];
 
+    console.log(`${tag} [STRATEGY_B:TIKWM] user/posts response — posts=${posts.length} has_more=${postsRes.data.has_more}`);
+
     if (posts.length === 0 && cursor === 0) {
+      console.warn(`${tag} [STRATEGY_B:TIKWM] posts vide — tikwm a les infos profil mais pas les vidéos`);
       const emptyProfile = parseTikWmProfileToUnified(
         userInfoRes.data.user, [], 0, false
       );
       return emptyProfile;
     }
 
-    return parseTikWmProfileToUnified(
-      userInfoRes.data.user,
-      posts,
-      nextCursor,
-      hasMore
-    );
+    const profile = parseTikWmProfileToUnified(userInfoRes.data.user, posts, nextCursor, hasMore);
+    console.log(`${tag} [STRATEGY_B:TIKWM] SUCCESS — media=${profile.media.length}`);
+    return profile;
   } catch (e) {
-    errors.push(`[tikwm-profile] ${e instanceof Error ? e.message : String(e)}`);
+    const msg = e instanceof Error ? e.message : String(e);
+    errors.push(`[tikwm-profile] ${msg}`);
+    console.warn(`${tag} [STRATEGY_B:TIKWM] FAILED — ${msg}`);
   }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // STRATÉGIE C : tikwm.com posts uniquement (si user/info a échoué)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  console.log(`${tag} [STRATEGY_C:TIKWM_POSTS_ONLY] calling user/posts seul`);
 
   try {
     const postsRes = await fetchTikTokUserPosts(username, 35, cursor);
@@ -311,11 +329,14 @@ async function _fetchTikTokProfileByUsername(
     const hasMore = postsRes.data.has_more === 1;
     const posts = postsRes.data.aweme_list ?? postsRes.data.videos ?? [];
 
+    console.log(`${tag} [STRATEGY_C:TIKWM_POSTS_ONLY] posts=${posts.length} has_more=${postsRes.data.has_more}`);
+
     if (posts.length === 0) throw new Error("Aucune vidéo trouvée via user/posts");
 
     const firstPost = posts[0];
     const author = firstPost.author;
     const media: UnifiedMedia[] = posts.map(parseTikWmPostItem);
+    console.log(`${tag} [STRATEGY_C:TIKWM_POSTS_ONLY] SUCCESS — media=${media.length}`);
 
     return {
       platform: "tiktok",
@@ -337,9 +358,13 @@ async function _fetchTikTokProfileByUsername(
       total_count: media.length,
     };
   } catch (e) {
-    errors.push(`[tikwm-posts-only] ${e instanceof Error ? e.message : String(e)}`);
+    const msg = e instanceof Error ? e.message : String(e);
+    errors.push(`[tikwm-posts-only] ${msg}`);
+    console.warn(`${tag} [STRATEGY_C:TIKWM_POSTS_ONLY] FAILED — ${msg}`);
   }
 
+  // Toutes les stratégies ont échoué
+  console.error(`${tag} [ALL_STRATEGIES_FAILED] errors: ${errors.join(" | ")}`);
   throw new Error(
     `Impossible de récupérer le profil TikTok @${username}. Détails : ${errors.join(" | ")}`
   );

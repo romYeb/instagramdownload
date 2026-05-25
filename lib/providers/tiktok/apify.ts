@@ -120,6 +120,9 @@ export async function fetchTikTokProfileViaApify(
     `https://api.apify.com/v2/acts/${ACTOR_ID}/run-sync-get-dataset-items` +
     `?token=${APIFY_TOKEN}&timeout=${APIFY_RUN_TIMEOUT_S}&memory=1024`;
 
+  const tag = `[apify:${username}]`;
+  console.log(`${tag} POST ${ACTOR_ID} — resultsPerPage=${resultsToFetch} offset=${offset}`);
+
   const r = await fetch(apiUrl, {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
@@ -129,12 +132,28 @@ export async function fetchTikTokProfileViaApify(
 
   if (!r.ok) {
     const txt = await r.text().catch(() => "");
+    console.error(`${tag} HTTP ${r.status} — ${txt.slice(0, 300)}`);
     throw new Error(`Apify HTTP ${r.status}: ${txt.slice(0, 300)}`);
   }
 
-  const allItems = (await r.json()) as ApifyTikTokItem[];
+  const rawText = await r.text();
+  const rawBodyType = rawText.trimStart().startsWith("[") ? "array"
+    : rawText.trimStart().startsWith("{") ? "object"
+    : rawText.trimStart().startsWith("<") ? "html"
+    : "unknown";
+
+  console.log(`${tag} response — status=${r.status} bodyType=${rawBodyType} bodySize=${rawText.length}`);
+
+  let allItems: ApifyTikTokItem[];
+  try {
+    allItems = JSON.parse(rawText) as ApifyTikTokItem[];
+  } catch (parseErr) {
+    console.error(`${tag} JSON parse failed — ${parseErr} — preview: ${rawText.slice(0, 200)}`);
+    throw new Error(`Apify JSON parse failed: ${parseErr}`);
+  }
 
   if (!Array.isArray(allItems) || allItems.length === 0) {
+    console.warn(`${tag} aucun item retourné (array length=0 ou non-array)`);
     throw new Error(`Apify: aucun résultat pour @${username}. Profil privé ou introuvable.`);
   }
 
@@ -143,6 +162,8 @@ export async function fetchTikTokProfileViaApify(
 
   // Infos profil depuis le 1er item
   const firstItem   = allItems[0];
+  console.log(`${tag} allItems=${allItems.length} pageItems=${pageItems.length} — 1er item: id=${firstItem?.id} hasVideoUrl=${!!firstItem?.videoUrl} hasVideoUrlNoWatermark=${!!firstItem?.videoUrlNoWatermark} hasWebVideoUrl=${!!firstItem?.webVideoUrl} isSlideshow=${firstItem?.isSlideshow} text="${String(firstItem?.text ?? "").slice(0, 60)}"`);
+
   const authorMeta  = firstItem.authorMeta ?? {};
   const totalVideos = authorMeta.video ?? allItems.length;
 
@@ -161,10 +182,24 @@ export async function fetchTikTokProfileViaApify(
     profile_url:    `https://www.tiktok.com/@${authorMeta.name ?? username}`,
   };
 
-  const media = pageItems.map(parseApifyItem);
+  let media: UnifiedMedia[];
+  try {
+    media = pageItems.map(parseApifyItem);
+  } catch (mapErr) {
+    console.error(`${tag} parseApifyItem threw during map — ${mapErr}`);
+    throw new Error(`parseApifyItem failed: ${mapErr}`);
+  }
+  console.log(`${tag} media after parseApifyItem=${media.length} (expected ${pageItems.length})`);
+
+  // Vérifier que les items ont des URLs valides
+  const withVideo = media.filter((m) => m.video_url || m.url);
+  const withPageUrl = media.filter((m) => (m.video_url ?? m.url ?? "").includes("tiktok.com/@"));
+  console.log(`${tag} media with video/url=${withVideo.length} media with page-url (→proxy resolves)=${withPageUrl.length}`);
 
   const nextOffset  = offset + limit;
   const hasNextPage = nextOffset < totalVideos && pageItems.length === limit;
+
+  console.log(`${tag} FINAL — media=${media.length} has_next_page=${hasNextPage} total_count=${totalVideos}`);
 
   return {
     platform:      "tiktok",

@@ -190,8 +190,12 @@ export function useMedia() {
         };
       });
     } catch {
+      // En cas d'erreur pagination : hasMore → false pour stopper loadAll.
+      // L'utilisateur peut recharger la page pour réessayer.
       set((prev) =>
-        prev.status === "success" ? { ...prev, isLoadingMore: false } : prev
+        prev.status === "success"
+          ? { ...prev, isLoadingMore: false, hasMore: false }
+          : prev
       );
     } finally {
       pendingMore.current = false;
@@ -199,18 +203,19 @@ export function useMedia() {
   }, [set]);
 
   // ─── loadAll (Instagram + TikTok) ────────────────────────────────────────
-  // FIX : fonctionne maintenant pour les deux plateformes
+  // Boucle protégée : s'arrête dès que hasMore=false ou cursor absent.
+  // loadMore met hasMore=false en cas d'erreur → la boucle s'interrompt
+  // naturellement sans pouvoir partir en boucle infinie.
 
   const loadAll = useCallback(async () => {
     const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
     while (true) {
       const s = stateRef.current;
-      // Arrêter si : pas de succès, plus de pages, ou pas de cursor
       if (s.status !== "success" || !s.hasMore || !s.cursor) break;
       if (pendingMore.current) { await wait(300); continue; }
-      loadMore();
-      await wait(400);
-      while (pendingMore.current) await wait(300);
+      await loadMore();
+      // Petite pause entre les pages pour ne pas hammerer le serveur
+      await wait(600);
     }
   }, [loadMore]);
 

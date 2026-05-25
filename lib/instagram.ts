@@ -260,8 +260,14 @@ async function fetchNextPageViaGraphQL(userId: string, cursor: string): Promise<
   const data = await igGet(
     `https://www.instagram.com/graphql/query/?query_hash=8c2a529969ee035a5063f2fc8602a0fd&variables=${encodeURIComponent(variables)}`
   );
+
+  // Instagram retourne parfois status_code 200 avec un body d'erreur (credentials expirés)
+  if (data?.message === "login_required" || data?.require_login) {
+    throw new Error("INSTAGRAM_AUTH_EXPIRED: session expirée — mettez à jour INSTAGRAM_SESSION_ID et INSTAGRAM_CSRF_TOKEN dans Vercel");
+  }
+
   const timeline = data?.data?.user?.edge_owner_to_timeline_media;
-  if (!timeline) throw new Error("No timeline data");
+  if (!timeline) throw new Error(`No timeline data in response — body: ${JSON.stringify(data).slice(0, 200)}`);
 
   return {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -272,10 +278,43 @@ async function fetchNextPageViaGraphQL(userId: string, cursor: string): Promise<
 }
 
 async function fetchNextPageViaUserFeed(userId: string, cursor: string): Promise<PageResult> {
+  // Le cursor GraphQL base64 ne fonctionne pas avec max_id.
+  // L'API feed/user attend un max_id au format numérique (timestamp ou pk).
+  // On tente quand même — si le cursor est numérique ça marchera.
   const data = await igGet(
     `https://www.instagram.com/api/v1/feed/user/${userId}/?count=50&max_id=${encodeURIComponent(cursor)}`
   );
-  if (!Array.isArray(data.items)) throw new Error("No items array");
+
+  if (data?.message === "login_required" || data?.require_login) {
+    throw new Error("INSTAGRAM_AUTH_EXPIRED: session expirée — mettez à jour vos credentials Instagram dans Vercel");
+  }
+  if (!Array.isArray(data?.items)) {
+    throw new Error(`No items array — body: ${JSON.stringify(data).slice(0, 200)}`);
+  }
+
+  return {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    media: data.items.map((item: any) => parseFeedItem(item)),
+    has_next_page: data.more_available ?? false,
+    end_cursor: data.next_max_id,
+  };
+}
+
+/**
+ * Nouvelle approche via api/v1/feed/user/{userId}/username/ (plus stable)
+ * Utilise le même cursor base64 que le GraphQL.
+ */
+async function fetchNextPageViaFeedV2(userId: string, cursor: string): Promise<PageResult> {
+  const data = await igGet(
+    `https://www.instagram.com/api/v1/feed/user/${userId}/?count=12&max_id=${encodeURIComponent(cursor)}&exclude_comment=true&only_fetch_first_carousel_media=false`
+  );
+
+  if (data?.message === "login_required" || data?.require_login) {
+    throw new Error("INSTAGRAM_AUTH_EXPIRED: session expirée");
+  }
+  if (!Array.isArray(data?.items)) {
+    throw new Error(`feedV2: no items — body: ${JSON.stringify(data).slice(0, 200)}`);
+  }
 
   return {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -289,10 +328,22 @@ export async function fetchNextPage(userId: string, cursor: string): Promise<Pag
   const errors: string[] = [];
 
   try { return await fetchNextPageViaGraphQL(userId, cursor); }
-  catch (e) { errors.push(`GraphQL: ${e instanceof Error ? e.message : e}`); }
+  catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    errors.push(`GraphQL: ${msg}`);
+    // Remonter immédiatement si c'est une erreur d'auth — inutile d'essayer les autres
+    if (msg.startsWith("INSTAGRAM_AUTH_EXPIRED")) throw e;
+  }
+
+  try { return await fetchNextPageViaFeedV2(userId, cursor); }
+  catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    errors.push(`FeedV2: ${msg}`);
+    if (msg.startsWith("INSTAGRAM_AUTH_EXPIRED")) throw e;
+  }
 
   try { return await fetchNextPageViaUserFeed(userId, cursor); }
   catch (e) { errors.push(`UserFeed: ${e instanceof Error ? e.message : e}`); }
 
-  throw new Error(`Pagination failed: ${errors.join("; ")}`);
+  throw new Error(`Pagination Instagram échouée: ${errors.join(" | ")}`);
 }

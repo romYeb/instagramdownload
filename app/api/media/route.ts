@@ -220,6 +220,15 @@ function handleInstagramError(e: unknown): NextResponse {
   if (msg.toLowerCase().includes("private")) return err("Compte Instagram privé.", "PRIVATE_CONTENT", 403);
   if (msg.includes("404") || msg.toLowerCase().includes("not found")) return err("Compte Instagram introuvable.", "MEDIA_NOT_FOUND", 404);
   if (msg.includes("429")) return err("Instagram limite les requêtes. Réessayez dans 30s.", "RATE_LIMIT", 429);
+  // Session expirée → message actionnable
+  if (msg.startsWith("INSTAGRAM_AUTH_EXPIRED")) {
+    return err(
+      "Session Instagram expirée. Reconnectez-vous à instagram.com, copiez les nouveaux cookies sessionid et csrftoken, et mettez-les à jour dans Vercel (Settings → Environment Variables).",
+      "FETCH_ERROR",
+      401,
+      msg
+    );
+  }
   return err("Impossible de récupérer ce profil Instagram.", "FETCH_ERROR", 503, msg);
 }
 

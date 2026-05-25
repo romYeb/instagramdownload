@@ -47,27 +47,45 @@ export async function GET(request: NextRequest) {
   const cursor   = sp.get("cursor");
 
   // ── 1a. Pagination TikTok ───────────────────────────────────────────────────
-  if (userId && cursor && platform === "tiktok") {
-    const cursorNum = parseInt(cursor, 10) || 0;
-    const isSecUid  = !/^\d+$/.test(userId); // secUid = alphanumérique, userId = numérique
+  // Condition : platform=tiktok explicite OU cursor au format aweme TikTok (digits_digits)
+  // Le second cas gère les anciens clients dont le JS ne passe pas platform=tiktok.
+  const isTikTokAwemeCursor = cursor ? /^\d{8,}_\d+$/.test(cursor) : false;
 
-    // Stratégie 0 : Apify via username stocké dans userId quand Apify est actif
-    // (userId contient le username TikTok quand Apify est configuré)
+  if (userId && cursor && (platform === "tiktok" || isTikTokAwemeCursor)) {
+    const isSecUid = !/^\d+$/.test(userId); // secUid = alphanumérique, userId = numérique
+
+    // ── Curseur aweme : {max_cursor}_{userId} ────────────────────────────────
+    // Ex : 3675117649773850666_34416401202
+    // La partie avant le _ est le cursor aweme ; après = userId.
+    const awemeParts   = isTikTokAwemeCursor && cursor ? cursor.split("_") : null;
+    const awemeUserId  = awemeParts ? awemeParts[awemeParts.length - 1] : userId;
+    const awemeCursor  = awemeParts ? awemeParts[0] : cursor ?? "0";
+    // Pour Apify, le cursor est un offset numérique simple (0, 30, 60…)
+    // Un cursor aweme n'est PAS compatible → on le repart à 0 pour Apify
+    const isApifyOffset = cursor ? !cursor.includes("_") && parseInt(cursor, 10) < 100_000 : false;
+    const apifyCursorNum = isApifyOffset ? parseInt(cursor ?? "0", 10) || 0 : 0;
+
+    // Stratégie 0 : Apify (si configuré + username disponible)
+    // username doit être un vrai handle (@lyvirestyle), pas un userId numérique.
     if (isApifyConfigured()) {
-      // Quand Apify est actif, userId = username TikTok, cursor = offset numérique
-      const apifyUsername = sp.get("username") ?? userId;
-      try {
-        const result = await fetchTikTokNextPageViaApify(apifyUsername, cursorNum);
-        return NextResponse.json(result);
-      } catch (e) {
-        return handleTikTokError(e);
+      const apifyUsername = sp.get("username") ?? (isSecUid ? userId : null);
+      if (apifyUsername) {
+        try {
+          const result = await fetchTikTokNextPageViaApify(apifyUsername, apifyCursorNum);
+          return NextResponse.json(result);
+        } catch (e) {
+          // Apify a échoué → tomber sur les stratégies mobile/web
+          console.warn("[apify-pagination] fallback to mobile API:", e instanceof Error ? e.message : e);
+        }
       }
+      // Pas de username valide → continuer avec les stratégies suivantes
     }
 
     // Stratégie 1 : API web TikTok (secUid) — même appel que le navigateur
     if (isSecUid) {
+      const secUidCursor = parseInt(awemeCursor, 10) || 0;
       try {
-        const webRes = await fetchTikTokWebVideos(userId, cursorNum);
+        const webRes = await fetchTikTokWebVideos(userId, secUidCursor);
         const media  = (webRes.itemList ?? []).map(parseTikTokWebItem);
         const hasMore = webRes.hasMore ?? false;
         return NextResponse.json({
@@ -81,9 +99,12 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Stratégie 2 : API mobile (userId numérique) — fallback
+    // Stratégie 2 : API mobile (userId numérique) — aweme API
+    // Utilise awemeUserId extrait du cursor si format digits_userId, sinon userId
+    const mobileUserId = awemeUserId || userId;
+    const mobileCursor = parseInt(awemeCursor, 10) || 0;
     try {
-      const awemeRes   = await fetchTikTokVideosByUserId(userId, cursorNum);
+      const awemeRes   = await fetchTikTokVideosByUserId(mobileUserId, mobileCursor);
       const media      = awemeRes.aweme_list.map(parseTikTokAwemeItem);
       const hasMore    = awemeRes.has_more === 1;
       const nextCursor = awemeRes.max_cursor ?? 0;
@@ -91,7 +112,7 @@ export async function GET(request: NextRequest) {
         platform: "tiktok",
         media,
         has_next_page: hasMore,
-        end_cursor: hasMore ? String(nextCursor) : undefined,
+        end_cursor: hasMore ? `${nextCursor}_${mobileUserId}` : undefined,
       });
     } catch (e) {
       return handleTikTokError(e);

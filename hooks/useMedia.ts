@@ -151,7 +151,7 @@ export function useMedia() {
       return;
     }
 
-    const { user, cursor, platform } = snap;
+    const { user, cursor, platform, username } = snap;
 
     try {
       let apiUrl: string;
@@ -160,9 +160,16 @@ export function useMedia() {
         // Instagram : pagination par userId + cursor
         apiUrl = `/api/media?userId=${encodeURIComponent(user.id)}&cursor=${encodeURIComponent(cursor)}`;
       } else {
-        // TikTok : pagination par userId numérique (API mobile TikTok)
-        // user.id = userId numérique récupéré via HTML scraping
-        apiUrl = `/api/media?userId=${encodeURIComponent(user.id)}&platform=tiktok&cursor=${encodeURIComponent(cursor)}`;
+        // TikTok : on passe userId + username + platform + cursor.
+        // - username : permet à Apify de paginer par handle (@lyvirestyle)
+        // - userId   : fallback pour l'API mobile TikTok (aweme)
+        // - platform=tiktok : discriminant côté serveur
+        apiUrl =
+          `/api/media` +
+          `?userId=${encodeURIComponent(user.id)}` +
+          `&username=${encodeURIComponent(username)}` +
+          `&platform=tiktok` +
+          `&cursor=${encodeURIComponent(cursor)}`;
       }
 
       const res = await fetch(apiUrl);
